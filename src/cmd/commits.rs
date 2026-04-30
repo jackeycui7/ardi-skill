@@ -60,9 +60,20 @@ pub fn run(_server_url: &str) -> Result<()> {
         "idle"
     };
 
+    let mut data = json!({ "pending": rows });
+    let mut message = format!("{} pending commits ({})", rows.len(), next_action);
+
+    // Wallet balance reminder — agents tend to forget topping up.
+    if let Ok(addr) = crate::auth::get_address() {
+        if let Some((warn_payload, warn_msg)) = crate::cmd::gas::low_balance_warning(&addr) {
+            data["balance_warning"] = warn_payload;
+            message = format!("{message}\n\n{warn_msg}");
+        }
+    }
+
     Output::success(
-        format!("{} pending commits ({})", rows.len(), next_action),
-        json!({ "pending": rows }),
+        message,
+        data,
         Internal {
             next_action: next_action.into(),
             next_command: rows

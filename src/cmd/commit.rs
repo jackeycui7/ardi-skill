@@ -267,19 +267,31 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
     });
     st.save()?;
 
+    let mut data = json!({
+        "epoch_id": epoch_id,
+        "word_id": args.word_id,
+        "tx_hash": tx_hash,
+        "commit_hash": format!("0x{}", hex::encode(hash)),
+        "bond_wei": tx::COMMIT_BOND_WEI.to_string(),
+        "reveal_after": cur.get("commit_deadline"),
+    });
+
+    let mut message = format!(
+        "Commit submitted: epoch={epoch_id} word={} tx={tx_hash}. Wait until reveal window opens, then `ardi-agent reveal --epoch {epoch_id} --word-id {}`.",
+        args.word_id, args.word_id
+    );
+
+    // Append a low-balance warning if the bond+gas just dropped us close.
+    if let Some((warn_payload, warn_msg)) =
+        crate::cmd::gas::low_balance_warning(&agent_str)
+    {
+        data["balance_warning"] = warn_payload;
+        message = format!("{message}\n\n{warn_msg}");
+    }
+
     Output::success(
-        format!(
-            "Commit submitted: epoch={epoch_id} word={} tx={tx_hash}. Wait until reveal window opens, then `ardi-agent reveal --epoch {epoch_id} --word-id {}`.",
-            args.word_id, args.word_id
-        ),
-        json!({
-            "epoch_id": epoch_id,
-            "word_id": args.word_id,
-            "tx_hash": tx_hash,
-            "commit_hash": format!("0x{}", hex::encode(hash)),
-            "bond_wei": tx::COMMIT_BOND_WEI.to_string(),
-            "reveal_after": cur.get("commit_deadline"),
-        }),
+        message,
+        data,
         Internal {
             next_action: "wait_reveal".into(),
             next_command: Some(format!(

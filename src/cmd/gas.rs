@@ -34,6 +34,43 @@ pub struct GasCheck {
     pub needs_refill_soon: bool,
 }
 
+/// Returns a low-balance warning payload + chat-friendly message line if
+/// the wallet balance is below the refill threshold or the hard floor.
+/// Other commands call this after successful txs so the LLM surfaces
+/// "you should top up soon" before the agent forgets.
+pub fn low_balance_warning(address: &str) -> Option<(serde_json::Value, String)> {
+    let g = check_balance(address).ok()?;
+    if !g.needs_refill_soon && g.sufficient {
+        return None;
+    }
+    let level = if !g.sufficient { "critical" } else { "warning" };
+    let msg = if !g.sufficient {
+        format!(
+            "⚠ CRITICAL: wallet has only {:.6} ETH (below {:.6} floor) — \
+             new commits will be refused. Send {:.4} ETH on Base mainnet to {address}.",
+            g.balance_eth, g.min_eth, g.recommended_eth
+        )
+    } else {
+        format!(
+            "⚠ Low balance: {:.6} ETH left (refill threshold {:.6}) — \
+             top up {:.4} ETH on Base mainnet to {address} soon.",
+            g.balance_eth, REFILL_THRESHOLD_ETH, g.recommended_eth
+        )
+    };
+    Some((
+        serde_json::json!({
+            "level": level,
+            "balance_eth": g.balance_eth,
+            "floor_eth": g.min_eth,
+            "refill_threshold_eth": REFILL_THRESHOLD_ETH,
+            "recommended_eth": g.recommended_eth,
+            "fund_address": address,
+            "fund_chain": "Base mainnet (chain id 8453)",
+        }),
+        msg,
+    ))
+}
+
 pub fn check_balance(address: &str) -> Result<GasCheck> {
     let addr = Address::from_str(address)
         .map_err(|e| anyhow::anyhow!("invalid address {address}: {e}"))?;

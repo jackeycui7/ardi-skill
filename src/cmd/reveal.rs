@@ -165,16 +165,25 @@ pub fn run(server_url: &str, epoch_id: u64, word_id: u64) -> Result<()> {
     }
     st.save()?;
 
+    let mut data = json!({
+        "epoch_id": epoch_id,
+        "word_id": word_id,
+        "tx_hash": tx_hash,
+    });
+    let mut message = format!(
+        "Reveal submitted: epoch={epoch_id} word={word_id} tx={tx_hash}. \
+         Wait for VRF (~30s after request_draw), then run inscribe."
+    );
+    if let Some((warn_payload, warn_msg)) =
+        crate::cmd::gas::low_balance_warning(&agent_str)
+    {
+        data["balance_warning"] = warn_payload;
+        message = format!("{message}\n\n{warn_msg}");
+    }
+
     Output::success(
-        format!(
-            "Reveal submitted: epoch={epoch_id} word={word_id} tx={tx_hash}. \
-             Wait for VRF (~30s after request_draw), then run inscribe."
-        ),
-        json!({
-            "epoch_id": epoch_id,
-            "word_id": word_id,
-            "tx_hash": tx_hash,
-        }),
+        message,
+        data,
         Internal {
             next_action: "wait_vrf_then_inscribe".into(),
             next_command: Some(format!(

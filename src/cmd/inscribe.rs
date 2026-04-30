@@ -180,14 +180,23 @@ pub fn run(server_url: &str, epoch_id: u64, word_id: u64) -> Result<()> {
         U256::ZERO
     };
 
+    let mut data = json!({
+        "epoch_id": epoch_id,
+        "word_id": word_id,
+        "tx_hash": tx_hash,
+        "token_id_estimate": total.to_string(),
+    });
+    let mut message = format!("🎉 Inscribed Ardinal #{total} — tx={tx_hash}");
+    if let Some((warn_payload, warn_msg)) =
+        crate::cmd::gas::low_balance_warning(&agent_str)
+    {
+        data["balance_warning"] = warn_payload;
+        message = format!("{message}\n\n{warn_msg}");
+    }
+
     Output::success(
-        format!("🎉 Inscribed Ardinal #{total} — tx={tx_hash}"),
-        json!({
-            "epoch_id": epoch_id,
-            "word_id": word_id,
-            "tx_hash": tx_hash,
-            "token_id_estimate": total.to_string(),
-        }),
+        message,
+        data,
         Internal {
             next_action: "celebrate".into(),
             next_command: Some("ardi-agent commits".into()),
