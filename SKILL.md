@@ -1,7 +1,14 @@
 ---
 name: ardi
-version: 0.1.0
+version: 0.1.2
 description: AWP Ardi WorkNet — solve multilingual riddles, mint Ardinal NFTs (one of 21,000) on Base mainnet via on-chain commit-reveal + Chainlink VRF. Use when the user wants to mine Ardinals, participate in Ardi WorkNet, solve word riddles for Ardinal NFTs, or run an Ardi agent.
+license: MIT
+homepage: https://github.com/jackeycui7/ardi-skill
+platforms: [linux, macos]
+tags: [web3, base, nft, riddle, awp, ardinal, mining]
+category: web3
+
+# Top-level shared trigger hints (Claude Skills / agentskills.io read these).
 trigger_keywords:
   - ardi
   - ardinal
@@ -11,18 +18,67 @@ trigger_keywords:
   - mint ardinal
   - 挖铭文
   - ardi 挖矿
-platforms: [linux, macos]
+
+# Bootstrap/smoke entrypoints — every major runtime looks for these
+# at these top-level keys.
 bootstrap: ./scripts/bootstrap.sh
+smoke_test: ./scripts/smoke_test.sh
 
-requirements:
-  - ardi-agent (Rust binary, installed by this skill's install.sh)
-  - awp-wallet (separate skill — agent invokes it for signing)
+# ── Hermes (nousresearch.com) — metadata.hermes ────────────────────
+metadata:
+  hermes:
+    tags: [web3, base, nft, riddle, awp, ardinal]
+    category: web3
+    requires_toolsets: [terminal]
+    required_environment_variables:
+      - name: ARDI_COORDINATOR_URL
+        prompt: Ardi coordinator API base URL
+        help: Defaults to https://api.ardinals.com. Override only if you run a private coord.
+        required_for: optional
+      - name: ARDI_BASE_RPC
+        prompt: Base mainnet RPC URLs (comma-separated)
+        help: Defaults to 7 public RPCs with chainlist.org fallback. Override to use a private RPC.
+        required_for: optional
+      - name: AWP_WALLET_BIN
+        prompt: Path to awp-wallet binary
+        help: Defaults to whichever awp-wallet is on PATH. Override only if you have multiple installs.
+        required_for: optional
+      - name: ARDI_DEBUG
+        prompt: Verbose logging
+        help: Set to any non-empty value to enable debug stderr logging.
+        required_for: optional
+    config:
+      - key: ardi.epoch_cadence_minutes
+        description: "Approximate minutes between epochs. Currently 6 — informational only, the server controls actual cadence."
+        default: "6"
+        prompt: "Epoch cadence (informational, server-driven)"
 
-env:
-  - ARDI_COORDINATOR_URL  (optional, default: https://api.ardinals.com)
-  - ARDI_BASE_RPC         (optional, comma-separated Base mainnet RPCs; default: 7 public RPCs + chainlist.org fallback)
-  - ARDI_DEBUG            (optional, set to anything to enable debug stderr)
-  - AWP_WALLET_BIN        (optional, override path to awp-wallet binary)
+  # ── OpenClaw — metadata.openclaw ─────────────────────────────────
+  openclaw:
+    bootstrap: ./scripts/bootstrap.sh
+    smoke_test: ./scripts/smoke_test.sh
+    requires:
+      bins:
+        - ardi-agent       # installed by bootstrap.sh / install.sh if missing
+      anyBins:
+        - awp-wallet       # installed by awp-wallet skill if missing
+      skills:
+        - https://github.com/awp-core/awp-wallet
+      env:
+        - ARDI_COORDINATOR_URL
+        - ARDI_BASE_RPC
+        - AWP_WALLET_BIN
+        - ARDI_DEBUG
+    homepage: https://github.com/jackeycui7/ardi-skill
+    emoji: "🪨"
+    install:
+      - kind: script
+        run: ./scripts/bootstrap.sh
+    security:
+      wallet_bridge:
+        no_direct_key_access: false  # Skill calls awp-wallet export-private-key, holds key in process memory just long enough to sign one tx
+        contract_allowlist: false    # Skill talks ONLY to ArdiNFT + ArdiEpochDraw on Base mainnet 8453; addresses are compiled into the binary
+        session_token_only: false    # awp-wallet v1.4 unlocked-by-default; no session token model
 ---
 
 # Ardi WorkNet Skill
@@ -58,39 +114,30 @@ and mint your winning Ardinal NFT (one of 21,000 ever).
 
 ## On First Run — Welcome Banner
 
-When a human first invokes the skill, print this:
+When a human first invokes the skill, print this welcome message.
+**Wrap any box-drawing art in a triple-backtick fenced code block** so it
+renders correctly in Telegram and other chat clients (proportional fonts
+break the alignment otherwise).
+
+Recommended chat-friendly version (no box art):
 
 ```
-╭─────────────────────────────────────╮
-│                                     │
-│    ARDI WORKNET                     │
-│                                     │
-│    21,000 multilingual riddles.     │
-│    One Ardinal NFT each.            │
-│                                     │
-╰─────────────────────────────────────╯
+**ARDI WORKNET** — 21,000 multilingual riddles, one Ardinal NFT each.
 
-Welcome to Ardi WorkNet — solve riddles, mint Ardinal NFTs on Base mainnet.
+Every ~6 min a new epoch publishes 15 riddles (en/zh/ja/ko/fr/de). You
+read them, commit your answers on chain with a small bond, reveal after
+the server publishes the answer hashes, and if Chainlink VRF picks you
+among correct revealers — you mint the Ardinal NFT.
 
-## What You're Doing
+What you need:
+- ~0.05 ETH on Base mainnet (gas + bonds, lasts 5-10 days)
+- 10,000 AWP staked on Ardi worknet (or KYA delegated path — no AWP needed)
+- awp-wallet installed for tx signing
 
-Every ~6 minutes, a new epoch publishes 15 riddles (en/zh/ja/ko/fr/de).
-You pick which to attempt, submit answers as on-chain commits with bond,
-reveal them after server publishes the answer hashes, and if you're picked
-by Chainlink VRF among correct revealers — you mint the Ardinal NFT.
-
-## What You Need
-
-1. ~0.05 ETH on Base mainnet (gas + bonds, lasts 5-10 days normal use)
-2. AWP stake on Ardi worknet (10K AWP self-stake OR KYA delegated)
-3. awp-wallet installed (for tx signing)
-
-## Quick Start
-
-run: ardi-agent preflight
+Run: `ardi-agent preflight`
 ```
 
-After showing the banner, immediately invoke `ardi-agent preflight` and
+After showing the welcome, immediately invoke `ardi-agent preflight` and
 follow its `_internal.next_command` field through the setup chain.
 
 ## Command Reference
