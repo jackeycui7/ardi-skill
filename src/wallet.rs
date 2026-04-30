@@ -1,12 +1,27 @@
-// awp-wallet bridge — the skill never holds private keys. All signing
-// shells out to the awp-wallet CLI. This module checks if the wallet is
-// installed, returns its address, and provides typed-data / tx signing
-// wrappers that other modules call.
+// Wallet — sign + broadcast EIP-1559 txs entirely in this process.
+//
+// Two key sources, in priority order:
+//   1. ARDI_AGENT_PK env (0x... 32-byte hex) — explicit override for
+//      testing / power users / CI.
+//   2. awp-wallet export-private-key — shells out, captures key into
+//      memory, signs, drops. Key is never persisted by us.
+//
+// Signing is done with alloy_signer_local::PrivateKeySigner against an
+// EIP-1559 tx envelope, then broadcast via eth_sendRawTransaction through
+// our RPC pool.
 
 use anyhow::{anyhow, Context, Result};
-use serde_json::Value;
+use alloy_consensus::{SignableTransaction, TxEip1559};
+use alloy_network::TxSignerSync;
+use alloy_primitives::{Address, Bytes, TxKind, U256};
+use alloy_rlp::Encodable;
+use alloy_signer_local::PrivateKeySigner;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::Command;
+
+use crate::log_debug;
+use crate::rpc;
 
 #[derive(Debug, Default, Clone)]
 pub struct WalletStatus {
@@ -16,77 +31,126 @@ pub struct WalletStatus {
     pub has_keystore: bool,
     pub can_receive: bool,
     pub address: Option<String>,
+    pub key_source: KeySource,
     pub human_status: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum KeySource {
+    #[default]
+    Unknown,
+    /// `ARDI_AGENT_PK` env is set.
+    EnvDirect,
+    /// awp-wallet CLI present, will be queried for export-private-key.
+    AwpWallet,
 }
 
 impl WalletStatus {
     pub fn check() -> Self {
         let mut s = Self::default();
 
-        // Find awp-wallet binary on PATH.
-        if let Ok(path) = which("awp-wallet") {
-            s.cli_installed = true;
-            s.cli_path = Some(path);
+        // Source 1: env override.
+        if std::env::var("ARDI_AGENT_PK").is_ok() {
+            s.key_source = KeySource::EnvDirect;
+            s.address = pk_to_address(&std::env::var("ARDI_AGENT_PK").unwrap()).ok();
+            s.can_receive = s.address.is_some();
+            s.human_status = format!(
+                "ARDI_AGENT_PK env set; agent = {}",
+                s.address.as_deref().unwrap_or("(invalid PK)")
+            );
+            return s;
         }
 
-        // Check ~/.awp-wallet directory.
-        let dir = wallet_dir();
-        s.wallet_dir_exists = dir.exists();
-        s.has_keystore = dir.join("keystore.json").exists() || dir.join("wallet.json").exists();
+        // Source 2: awp-wallet on PATH.
+        if let Ok(path) = which("awp-wallet") {
+            s.cli_installed = true;
+            s.cli_path = Some(path.clone());
+            s.key_source = KeySource::AwpWallet;
+            let dir = wallet_dir();
+            s.wallet_dir_exists = dir.exists();
+            s.has_keystore =
+                dir.join("keystore.json").exists() || dir.join("wallet.json").exists();
 
-        // Try `awp-wallet receive` to confirm wallet is accessible.
-        if s.cli_installed {
-            if let Some(p) = &s.cli_path {
-                if let Ok(out) = Command::new(p).arg("receive").output() {
-                    if out.status.success() {
-                        let txt = String::from_utf8_lossy(&out.stdout);
-                        if let Ok(v) = serde_json::from_str::<Value>(&txt) {
-                            if let Some(addr) = v.get("address").and_then(|x| x.as_str()) {
-                                s.can_receive = true;
-                                s.address = Some(addr.to_string());
-                            }
+            if let Ok(out) = Command::new(&path).arg("receive").output() {
+                if out.status.success() {
+                    let txt = String::from_utf8_lossy(&out.stdout);
+                    if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+                        // awp-wallet v1.4 returns {"eoaAddress":"0x..."}.
+                        // Older versions returned {"address":"0x..."}; honor both.
+                        if let Some(addr) = v
+                            .get("eoaAddress")
+                            .or_else(|| v.get("address"))
+                            .and_then(|x| x.as_str())
+                        {
+                            s.can_receive = true;
+                            s.address = Some(addr.to_lowercase());
                         }
                     }
                 }
             }
         }
 
-        s.human_status = match (s.cli_installed, s.has_keystore, s.can_receive) {
-            (false, _, _) => "awp-wallet not installed".into(),
-            (true, false, _) => "awp-wallet installed but no wallet — safe to run `awp-wallet setup`".into(),
-            (true, true, true) => format!("ready: {}", s.address.as_deref().unwrap_or("?")),
-            (true, true, false) => "wallet exists but inaccessible (do NOT run init — would overwrite)".into(),
+        s.human_status = match (&s.key_source, s.cli_installed, s.has_keystore, s.can_receive) {
+            (KeySource::Unknown, _, _, _) => {
+                "no key source: set ARDI_AGENT_PK env, or install awp-wallet".into()
+            }
+            (KeySource::EnvDirect, _, _, _) => {
+                format!("ARDI_AGENT_PK env; agent = {}", s.address.as_deref().unwrap_or("?"))
+            }
+            (KeySource::AwpWallet, false, _, _) => "awp-wallet not installed".into(),
+            (KeySource::AwpWallet, true, false, _) => {
+                "awp-wallet installed but no wallet — run `awp-wallet setup`".into()
+            }
+            (KeySource::AwpWallet, true, true, true) => {
+                format!("awp-wallet ready; agent = {}", s.address.as_deref().unwrap_or("?"))
+            }
+            (KeySource::AwpWallet, true, true, false) => {
+                "wallet exists but inaccessible (do NOT re-run setup — overwrites)".into()
+            }
         };
-
         s
     }
 
-    /// Is it safe to run `awp-wallet setup` / `init`? Only when no wallet exists.
     pub fn safe_to_init(&self) -> bool {
-        !self.has_keystore
+        self.key_source != KeySource::EnvDirect && !self.has_keystore
     }
 
     pub fn setup_command(&self) -> &'static str {
-        if !self.cli_installed {
-            "git clone https://github.com/awp-core/awp-wallet.git ~/awp-wallet && cd ~/awp-wallet && bash install.sh"
-        } else if self.safe_to_init() {
-            "awp-wallet setup"
-        } else {
-            "(wallet already exists — do not re-init)"
+        match self.key_source {
+            KeySource::EnvDirect => "(env-direct mode; no setup needed)",
+            KeySource::AwpWallet | KeySource::Unknown => {
+                if !self.cli_installed {
+                    "git clone https://github.com/awp-core/awp-wallet ~/awp-wallet && cd ~/awp-wallet && bash install.sh && awp-wallet setup"
+                } else if self.safe_to_init() {
+                    "awp-wallet setup"
+                } else {
+                    "(wallet already exists — do not re-init)"
+                }
+            }
         }
     }
 
     pub fn suggestion(&self) -> String {
-        if !self.cli_installed {
-            "Install awp-wallet first. See setup_command in debug output."
-        } else if !self.has_keystore {
-            "Run `awp-wallet setup` to create your agent wallet."
-        } else if !self.can_receive {
-            "Wallet exists but unreadable. DO NOT run setup — that overwrites. Investigate awp-wallet install."
-        } else {
-            "Wallet OK."
+        match self.key_source {
+            KeySource::EnvDirect => {
+                "ARDI_AGENT_PK is set; you're good. (Or unset it to use awp-wallet.)".into()
+            }
+            KeySource::Unknown => {
+                "Either: (a) set ARDI_AGENT_PK=0x... env (testing/CI only) \
+                 or (b) install awp-wallet via `git clone https://github.com/awp-core/awp-wallet \
+                 ~/awp-wallet && cd ~/awp-wallet && bash install.sh && awp-wallet setup`."
+                    .into()
+            }
+            KeySource::AwpWallet if !self.has_keystore => {
+                "Run `awp-wallet setup` to create your wallet.".into()
+            }
+            KeySource::AwpWallet if !self.can_receive => {
+                "Wallet exists but unreadable. DO NOT run setup — that overwrites. \
+                 Investigate awp-wallet install."
+                    .into()
+            }
+            KeySource::AwpWallet => "Wallet OK.".into(),
         }
-        .to_string()
     }
 }
 
@@ -95,59 +159,7 @@ fn wallet_dir() -> PathBuf {
     PathBuf::from(home).join(".awp-wallet")
 }
 
-/// Sign EIP-712 typed data via awp-wallet bridge. Returns 0x-prefixed signature.
-pub fn sign_typed_data(typed_data_json: &Value) -> Result<String> {
-    let bin = which("awp-wallet").context("awp-wallet not installed")?;
-    let payload = serde_json::to_string(typed_data_json)?;
-    let out = Command::new(&bin)
-        .arg("sign-typed-data")
-        .arg("--data")
-        .arg(&payload)
-        .output()
-        .context("failed to invoke awp-wallet sign-typed-data")?;
-    if !out.status.success() {
-        return Err(anyhow!(
-            "awp-wallet sign-typed-data failed (exit {:?}): {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
-    let v: Value = serde_json::from_slice(&out.stdout)?;
-    v.get("signature")
-        .and_then(|x| x.as_str())
-        .map(String::from)
-        .ok_or_else(|| anyhow!("no signature field in awp-wallet output"))
-}
-
-/// Send raw EIP-1559 tx via awp-wallet bridge. `tx` is a JSON object
-/// with `to`, `data`, `value`, `chainId`, `gas`, `maxFeePerGas`, etc.
-/// Returns the tx hash.
-pub fn send_tx(tx: &Value) -> Result<String> {
-    let bin = which("awp-wallet").context("awp-wallet not installed")?;
-    let payload = serde_json::to_string(tx)?;
-    let out = Command::new(&bin)
-        .arg("send-tx")
-        .arg("--tx")
-        .arg(&payload)
-        .output()
-        .context("failed to invoke awp-wallet send-tx")?;
-    if !out.status.success() {
-        return Err(anyhow!(
-            "awp-wallet send-tx failed (exit {:?}): {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
-    let v: Value = serde_json::from_slice(&out.stdout)?;
-    v.get("hash")
-        .or_else(|| v.get("txHash"))
-        .and_then(|x| x.as_str())
-        .map(String::from)
-        .ok_or_else(|| anyhow!("no tx hash in awp-wallet output"))
-}
-
 fn which(bin: &str) -> Result<PathBuf> {
-    // Honor explicit override.
     if let Ok(p) = std::env::var("AWP_WALLET_BIN") {
         let pb = PathBuf::from(p);
         if pb.exists() {
@@ -162,4 +174,175 @@ fn which(bin: &str) -> Result<PathBuf> {
         }
     }
     Err(anyhow!("`{bin}` not found on PATH"))
+}
+
+fn pk_to_address(pk_hex: &str) -> Result<String> {
+    let signer: PrivateKeySigner = pk_hex
+        .parse()
+        .map_err(|e| anyhow!("ARDI_AGENT_PK is not a valid 32-byte hex private key: {e}"))?;
+    Ok(format!("0x{:x}", signer.address()))
+}
+
+/// Resolve the private key for signing. Caller is responsible for not
+/// persisting / logging the returned string.
+fn resolve_private_key() -> Result<String> {
+    if let Ok(pk) = std::env::var("ARDI_AGENT_PK") {
+        if !pk.is_empty() {
+            return Ok(pk);
+        }
+    }
+
+    // Fall back to awp-wallet export.
+    let bin = which("awp-wallet").context(
+        "no key source: set ARDI_AGENT_PK env, or install awp-wallet \
+         (https://github.com/awp-core/awp-wallet)",
+    )?;
+    log_debug!("resolve_private_key: shelling out to awp-wallet export-private-key");
+    // awp-wallet v1.4 returns {"privateKey":"0x...","address":"0x...","warning":"..."}
+    // immediately, no confirm prompt — wallet is unlocked-by-default in v1.x.
+    let out = Command::new(&bin)
+        .arg("export-private-key")
+        .output()
+        .context("failed to invoke awp-wallet export-private-key")?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "awp-wallet export-private-key failed (exit {:?}): {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // awp-wallet may emit either {"privateKey":"0x..."} or a plain 0x... line.
+    if let Ok(v) = serde_json::from_str::<Value>(stdout.trim()) {
+        if let Some(pk) = v
+            .get("privateKey")
+            .or_else(|| v.get("private_key"))
+            .and_then(|x| x.as_str())
+        {
+            return Ok(pk.to_string());
+        }
+    }
+    let trimmed = stdout.trim().to_string();
+    if trimmed.starts_with("0x") && trimmed.len() == 66 {
+        return Ok(trimmed);
+    }
+    Err(anyhow!(
+        "awp-wallet export-private-key returned unexpected output (expected JSON {{privateKey:0x...}} or bare 0x... line)"
+    ))
+}
+
+/// Sign + broadcast an EIP-1559 transaction. The `tx` JSON is the same
+/// shape `tx::build_tx` produces. Returns the broadcast tx hash.
+pub fn send_tx(tx: &Value) -> Result<String> {
+    // Pull required fields from the tx JSON.
+    let to = tx
+        .get("to")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("tx missing `to`"))?;
+    let data_hex = tx
+        .get("data")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("tx missing `data`"))?;
+    let value_hex = tx
+        .get("value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0x0");
+    let nonce = tx
+        .get("nonce")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow!("tx missing `nonce`"))?;
+    let gas_hex = tx
+        .get("gas")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("tx missing `gas`"))?;
+    let max_fee_hex = tx
+        .get("maxFeePerGas")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("tx missing `maxFeePerGas`"))?;
+    let max_prio_hex = tx
+        .get("maxPriorityFeePerGas")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("tx missing `maxPriorityFeePerGas`"))?;
+    let chain_id = tx
+        .get("chainId")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow!("tx missing `chainId`"))?;
+
+    let to_addr: Address = to
+        .parse()
+        .map_err(|e| anyhow!("invalid `to` address: {e}"))?;
+    let value_u256 = U256::from_str_radix(value_hex.trim_start_matches("0x"), 16)
+        .map_err(|e| anyhow!("invalid `value` hex: {e}"))?;
+    let gas = u64::from_str_radix(gas_hex.trim_start_matches("0x"), 16)
+        .map_err(|e| anyhow!("invalid `gas`: {e}"))?;
+    let max_fee = u128::from_str_radix(max_fee_hex.trim_start_matches("0x"), 16)
+        .map_err(|e| anyhow!("invalid `maxFeePerGas`: {e}"))?;
+    let max_prio = u128::from_str_radix(max_prio_hex.trim_start_matches("0x"), 16)
+        .map_err(|e| anyhow!("invalid `maxPriorityFeePerGas`: {e}"))?;
+    let data_bytes = hex::decode(data_hex.trim_start_matches("0x"))
+        .map_err(|e| anyhow!("invalid `data` hex: {e}"))?;
+
+    // Resolve key + immediately use to build a signer; don't keep the hex
+    // string around longer than necessary.
+    let pk = resolve_private_key()?;
+    let signer: PrivateKeySigner = pk
+        .parse()
+        .map_err(|e| anyhow!("private key parse failed: {e}"))?;
+    drop(pk); // best-effort scrub
+
+    let mut unsigned = TxEip1559 {
+        chain_id,
+        nonce,
+        gas_limit: gas,
+        max_fee_per_gas: max_fee,
+        max_priority_fee_per_gas: max_prio,
+        to: TxKind::Call(to_addr),
+        value: value_u256,
+        access_list: Default::default(),
+        input: Bytes::from(data_bytes),
+    };
+
+    let signature = signer
+        .sign_transaction_sync(&mut unsigned)
+        .map_err(|e| anyhow!("EIP-1559 sign failed: {e}"))?;
+    let signed = unsigned.into_signed(signature);
+
+    // RLP-encode envelope as 0x02 || rlp(signed).
+    let mut raw = Vec::with_capacity(256);
+    raw.push(0x02);
+    signed.rlp_encode(&mut raw);
+
+    // Broadcast.
+    let raw_hex = format!("0x{}", hex::encode(&raw));
+    let r = rpc::call("eth_sendRawTransaction", json!([raw_hex]))?;
+    let hash = r
+        .as_str()
+        .ok_or_else(|| anyhow!("eth_sendRawTransaction returned non-string: {r}"))?
+        .to_string();
+    Ok(hash)
+}
+
+/// EIP-712 typed data signing — used by AWP gasless registration.
+/// Same dual key path. Computes the EIP-712 digest via alloy_dyn_abi
+/// then sign-hashes with the local signer (sync, no tokio).
+pub fn sign_typed_data(typed_data_json: &Value) -> Result<String> {
+    use alloy_dyn_abi::TypedData;
+    use alloy_signer::SignerSync;
+
+    let pk = resolve_private_key()?;
+    let signer: PrivateKeySigner = pk
+        .parse()
+        .map_err(|e| anyhow!("private key parse failed: {e}"))?;
+    drop(pk);
+
+    let typed: TypedData = serde_json::from_value(typed_data_json.clone())
+        .map_err(|e| anyhow!("typed data parse failed: {e}"))?;
+    let digest = typed
+        .eip712_signing_hash()
+        .map_err(|e| anyhow!("EIP-712 digest compute failed: {e}"))?;
+    let signature = signer
+        .sign_hash_sync(&digest)
+        .map_err(|e| anyhow!("EIP-712 hash sign failed: {e}"))?;
+
+    Ok(format!("0x{}", hex::encode(signature.as_bytes())))
 }
