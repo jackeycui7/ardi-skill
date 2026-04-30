@@ -1,0 +1,117 @@
+// ardi-agent — CLI for AWP Ardi WorkNet.
+//
+// The agent's LLM drives this CLI. Each subcommand prints structured JSON
+// to stdout (the LLM reads `_internal.next_command` to chain steps) and
+// human progress to stderr. The skill never calls an LLM itself.
+
+use clap::{Parser, Subcommand};
+
+mod auth;
+mod awp_register;
+mod chain;
+mod client;
+mod cmd;
+mod output;
+mod rpc;
+mod state;
+mod tx;
+mod wallet;
+
+#[macro_export]
+macro_rules! log_info {
+    ($($t:tt)*) => { eprintln!("[info]  {}", format!($($t)*)) };
+}
+#[macro_export]
+macro_rules! log_warn {
+    ($($t:tt)*) => { eprintln!("[warn]  {}", format!($($t)*)) };
+}
+#[macro_export]
+macro_rules! log_error {
+    ($($t:tt)*) => { eprintln!("[error] {}", format!($($t)*)) };
+}
+#[macro_export]
+macro_rules! log_debug {
+    ($($t:tt)*) => {
+        if std::env::var("ARDI_DEBUG").is_ok() {
+            eprintln!("[debug] {}", format!($($t)*));
+        }
+    };
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ardi-agent",
+    version,
+    about = "AWP Ardi WorkNet agent — solve riddles, mint Ardinal NFTs"
+)]
+struct Cli {
+    /// Coordinator base URL.
+    #[arg(long, env = "ARDI_COORDINATOR_URL", default_value = "https://api.ardinals.com")]
+    server: String,
+
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// 5-step env check before any chain action.
+    Preflight,
+    /// Show stake status + 3-path eligibility guidance.
+    Stake,
+    /// Show Base ETH balance + refill guidance.
+    Gas,
+    /// Combined view: wallet, AWP reg, ETH, coordinator, agent state.
+    Status,
+    /// Fetch the current commit-able epoch and its riddles. The LLM solves
+    /// them then calls `commit` for each.
+    Context,
+    /// Submit one commit. Skill stores (salt, answer) locally for reveal.
+    Commit {
+        /// Epoch id; defaults to current.
+        #[arg(long)]
+        epoch: Option<u64>,
+        #[arg(long)]
+        word_id: u64,
+        #[arg(long)]
+        answer: String,
+    },
+    /// List local pending commits and the next action for each.
+    Commits,
+    /// Reveal a previously committed (epoch, wordId).
+    Reveal {
+        #[arg(long)]
+        epoch: u64,
+        #[arg(long)]
+        word_id: u64,
+    },
+    /// Check on-chain winner; if it's us, mint the Ardinal NFT.
+    Inscribe {
+        #[arg(long)]
+        epoch: u64,
+        #[arg(long)]
+        word_id: u64,
+    },
+}
+
+fn main() {
+    let cli = Cli::parse();
+    let result = match cli.cmd {
+        Cmd::Preflight => cmd::preflight::run(&cli.server),
+        Cmd::Stake => cmd::stake::run(&cli.server),
+        Cmd::Gas => cmd::gas::run(&cli.server),
+        Cmd::Status => cmd::status::run(&cli.server),
+        Cmd::Context => cmd::context::run(&cli.server),
+        Cmd::Commit { epoch, word_id, answer } => cmd::commit::run(
+            &cli.server,
+            cmd::commit::CommitArgs { epoch_id: epoch, word_id, answer },
+        ),
+        Cmd::Commits => cmd::commits::run(&cli.server),
+        Cmd::Reveal { epoch, word_id } => cmd::reveal::run(&cli.server, epoch, word_id),
+        Cmd::Inscribe { epoch, word_id } => cmd::inscribe::run(&cli.server, epoch, word_id),
+    };
+    if let Err(e) = result {
+        log_error!("fatal: {e:#}");
+        std::process::exit(1);
+    }
+}
