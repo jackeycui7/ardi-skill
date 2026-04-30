@@ -1,14 +1,16 @@
 // Wallet — sign + broadcast EIP-1559 txs entirely in this process.
 //
-// Two key sources, in priority order:
-//   1. ARDI_AGENT_PK env (0x... 32-byte hex) — explicit override for
-//      testing / power users / CI.
-//   2. awp-wallet export-private-key — shells out, captures key into
-//      memory, signs, drops. Key is never persisted by us.
+// Single key source: awp-wallet export-private-key. We shell out, get
+// the key, hold it in memory just long enough to build a signer, sign,
+// drop. Key is never persisted, logged, or written to disk by us.
 //
 // Signing is done with alloy_signer_local::PrivateKeySigner against an
 // EIP-1559 tx envelope, then broadcast via eth_sendRawTransaction through
 // our RPC pool.
+//
+// We deliberately do NOT support reading a raw key from env. End users
+// should use awp-wallet — the standard AWP wallet skill — and not be
+// invited to paste private keys into shell config.
 
 use anyhow::{anyhow, Context, Result};
 use alloy_consensus::{SignableTransaction, TxEip1559};
@@ -31,41 +33,16 @@ pub struct WalletStatus {
     pub has_keystore: bool,
     pub can_receive: bool,
     pub address: Option<String>,
-    pub key_source: KeySource,
     pub human_status: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub enum KeySource {
-    #[default]
-    Unknown,
-    /// `ARDI_AGENT_PK` env is set.
-    EnvDirect,
-    /// awp-wallet CLI present, will be queried for export-private-key.
-    AwpWallet,
 }
 
 impl WalletStatus {
     pub fn check() -> Self {
         let mut s = Self::default();
 
-        // Source 1: env override.
-        if std::env::var("ARDI_AGENT_PK").is_ok() {
-            s.key_source = KeySource::EnvDirect;
-            s.address = pk_to_address(&std::env::var("ARDI_AGENT_PK").unwrap()).ok();
-            s.can_receive = s.address.is_some();
-            s.human_status = format!(
-                "ARDI_AGENT_PK env set; agent = {}",
-                s.address.as_deref().unwrap_or("(invalid PK)")
-            );
-            return s;
-        }
-
-        // Source 2: awp-wallet on PATH.
         if let Ok(path) = which("awp-wallet") {
             s.cli_installed = true;
             s.cli_path = Some(path.clone());
-            s.key_source = KeySource::AwpWallet;
             let dir = wallet_dir();
             s.wallet_dir_exists = dir.exists();
             s.has_keystore =
@@ -90,21 +67,13 @@ impl WalletStatus {
             }
         }
 
-        s.human_status = match (&s.key_source, s.cli_installed, s.has_keystore, s.can_receive) {
-            (KeySource::Unknown, _, _, _) => {
-                "no key source: set ARDI_AGENT_PK env, or install awp-wallet".into()
-            }
-            (KeySource::EnvDirect, _, _, _) => {
-                format!("ARDI_AGENT_PK env; agent = {}", s.address.as_deref().unwrap_or("?"))
-            }
-            (KeySource::AwpWallet, false, _, _) => "awp-wallet not installed".into(),
-            (KeySource::AwpWallet, true, false, _) => {
-                "awp-wallet installed but no wallet — run `awp-wallet setup`".into()
-            }
-            (KeySource::AwpWallet, true, true, true) => {
+        s.human_status = match (s.cli_installed, s.has_keystore, s.can_receive) {
+            (false, _, _) => "awp-wallet not installed".into(),
+            (true, false, _) => "awp-wallet installed but no wallet — run `awp-wallet setup`".into(),
+            (true, true, true) => {
                 format!("awp-wallet ready; agent = {}", s.address.as_deref().unwrap_or("?"))
             }
-            (KeySource::AwpWallet, true, true, false) => {
+            (true, true, false) => {
                 "wallet exists but inaccessible (do NOT re-run setup — overwrites)".into()
             }
         };
@@ -112,44 +81,32 @@ impl WalletStatus {
     }
 
     pub fn safe_to_init(&self) -> bool {
-        self.key_source != KeySource::EnvDirect && !self.has_keystore
+        !self.has_keystore
     }
 
     pub fn setup_command(&self) -> &'static str {
-        match self.key_source {
-            KeySource::EnvDirect => "(env-direct mode; no setup needed)",
-            KeySource::AwpWallet | KeySource::Unknown => {
-                if !self.cli_installed {
-                    "git clone https://github.com/awp-core/awp-wallet ~/awp-wallet && cd ~/awp-wallet && bash install.sh && awp-wallet setup"
-                } else if self.safe_to_init() {
-                    "awp-wallet setup"
-                } else {
-                    "(wallet already exists — do not re-init)"
-                }
-            }
+        if !self.cli_installed {
+            "git clone https://github.com/awp-core/awp-wallet ~/awp-wallet && cd ~/awp-wallet && bash install.sh && awp-wallet setup"
+        } else if self.safe_to_init() {
+            "awp-wallet setup"
+        } else {
+            "(wallet already exists — do not re-init)"
         }
     }
 
     pub fn suggestion(&self) -> String {
-        match self.key_source {
-            KeySource::EnvDirect => {
-                "ARDI_AGENT_PK is set; you're good. (Or unset it to use awp-wallet.)".into()
-            }
-            KeySource::Unknown => {
-                "Either: (a) set ARDI_AGENT_PK=0x... env (testing/CI only) \
-                 or (b) install awp-wallet via `git clone https://github.com/awp-core/awp-wallet \
-                 ~/awp-wallet && cd ~/awp-wallet && bash install.sh && awp-wallet setup`."
-                    .into()
-            }
-            KeySource::AwpWallet if !self.has_keystore => {
-                "Run `awp-wallet setup` to create your wallet.".into()
-            }
-            KeySource::AwpWallet if !self.can_receive => {
-                "Wallet exists but unreadable. DO NOT run setup — that overwrites. \
-                 Investigate awp-wallet install."
-                    .into()
-            }
-            KeySource::AwpWallet => "Wallet OK.".into(),
+        if !self.cli_installed {
+            "Install awp-wallet first: `git clone https://github.com/awp-core/awp-wallet \
+             ~/awp-wallet && cd ~/awp-wallet && bash install.sh && awp-wallet setup`."
+                .into()
+        } else if !self.has_keystore {
+            "Run `awp-wallet setup` to create your wallet.".into()
+        } else if !self.can_receive {
+            "Wallet exists but unreadable. DO NOT run setup — that overwrites. \
+             Investigate awp-wallet install."
+                .into()
+        } else {
+            "Wallet OK.".into()
         }
     }
 }
@@ -176,26 +133,13 @@ fn which(bin: &str) -> Result<PathBuf> {
     Err(anyhow!("`{bin}` not found on PATH"))
 }
 
-fn pk_to_address(pk_hex: &str) -> Result<String> {
-    let signer: PrivateKeySigner = pk_hex
-        .parse()
-        .map_err(|e| anyhow!("ARDI_AGENT_PK is not a valid 32-byte hex private key: {e}"))?;
-    Ok(format!("0x{:x}", signer.address()))
-}
-
 /// Resolve the private key for signing. Caller is responsible for not
 /// persisting / logging the returned string.
 fn resolve_private_key() -> Result<String> {
-    if let Ok(pk) = std::env::var("ARDI_AGENT_PK") {
-        if !pk.is_empty() {
-            return Ok(pk);
-        }
-    }
-
-    // Fall back to awp-wallet export.
     let bin = which("awp-wallet").context(
-        "no key source: set ARDI_AGENT_PK env, or install awp-wallet \
-         (https://github.com/awp-core/awp-wallet)",
+        "awp-wallet not installed. Install via: \
+         `git clone https://github.com/awp-core/awp-wallet ~/awp-wallet && \
+          cd ~/awp-wallet && bash install.sh && awp-wallet setup`",
     )?;
     log_debug!("resolve_private_key: shelling out to awp-wallet export-private-key");
     // awp-wallet v1.4 returns {"privateKey":"0x...","address":"0x...","warning":"..."}

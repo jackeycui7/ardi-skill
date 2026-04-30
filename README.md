@@ -81,7 +81,7 @@ Run `ardi-agent <cmd> --help` for flags.
 |---|---|---|
 | `ARDI_COORDINATOR_URL` | `https://api.ardinals.com` | Coordinator API base URL |
 | `ARDI_BASE_RPC` | (uses 7 public RPCs) | Comma-separated Base RPCs |
-| `ARDI_AGENT_ADDR` | (from awp-wallet) | Override agent address |
+| `AWP_WALLET_BIN` | (from PATH) | Override awp-wallet binary path |
 | `ARDI_DEBUG` | (off) | Verbose stderr logging |
 
 ## State

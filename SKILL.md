@@ -22,6 +22,7 @@ env:
   - ARDI_COORDINATOR_URL  (optional, default: https://api.ardinals.com)
   - ARDI_BASE_RPC         (optional, comma-separated Base mainnet RPCs; default: 7 public RPCs + chainlist.org fallback)
   - ARDI_DEBUG            (optional, set to anything to enable debug stderr)
+  - AWP_WALLET_BIN        (optional, override path to awp-wallet binary)
 ---
 
 # Ardi WorkNet Skill
