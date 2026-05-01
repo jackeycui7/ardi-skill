@@ -7,7 +7,7 @@ use alloy_sol_types::SolCall;
 use serde_json::{json, Value};
 use std::time::Duration;
 
-use crate::chain::{ArdiEpochDraw, ArdiNFT, EmissionDistributor, IERC20};
+use crate::chain::{ArdiEpochDraw, ArdiNFT, ArdiOTC, EmissionDistributor, IERC20, IERC721};
 use crate::rpc;
 use crate::wallet;
 
@@ -114,6 +114,22 @@ pub fn calldata_approve(spender: Address, amount: U256) -> Vec<u8> {
 
 pub fn calldata_transfer_nft(from: Address, to: Address, token_id: U256) -> Vec<u8> {
     ArdiNFT::transferFromCall { from, to, tokenId: token_id }.abi_encode()
+}
+
+pub fn calldata_otc_list(token_id: U256, price_wei: U256) -> Vec<u8> {
+    ArdiOTC::listCall { tokenId: token_id, priceWei: price_wei }.abi_encode()
+}
+
+pub fn calldata_otc_unlist(token_id: U256) -> Vec<u8> {
+    ArdiOTC::unlistCall { tokenId: token_id }.abi_encode()
+}
+
+pub fn calldata_otc_buy(token_id: U256) -> Vec<u8> {
+    ArdiOTC::buyCall { tokenId: token_id }.abi_encode()
+}
+
+pub fn calldata_set_approval_for_all(operator: Address, approved: bool) -> Vec<u8> {
+    IERC721::setApprovalForAllCall { operator, approved }.abi_encode()
 }
 
 /// Wait for a tx receipt up to `timeout_secs`, return success bool + block.

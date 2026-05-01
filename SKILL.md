@@ -1,6 +1,6 @@
 ---
 name: ardi
-version: 0.2.1
+version: 0.2.2
 description: AWP Ardi WorkNet — solve multilingual riddles, mint Ardinal NFTs (one of 21,000) on Base mainnet via on-chain commit-reveal + Chainlink VRF. Use when the user wants to mine Ardinals, participate in Ardi WorkNet, solve word riddles for Ardinal NFTs, or run an Ardi agent.
 license: MIT
 homepage: https://github.com/jackeycui7/ardi-skill

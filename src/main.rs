@@ -120,6 +120,33 @@ enum Cmd {
         #[arg(long)]
         to: String,
     },
+    /// Peer-to-peer marketplace (ArdiOTC). Subcommands list / unlist / buy / show.
+    Market {
+        #[command(subcommand)]
+        action: MarketCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum MarketCmd {
+    /// List one of your Ardinals for sale at fixed ETH price.
+    List {
+        #[arg(long = "token-id")] token_id: u64,
+        /// Price in ETH (decimal). Min 0.000001.
+        #[arg(long)] price: f64,
+    },
+    /// Cancel one of your active listings.
+    Unlist {
+        #[arg(long = "token-id")] token_id: u64,
+    },
+    /// Buy a listed Ardinal — pays full price, contract refunds excess.
+    Buy {
+        #[arg(long = "token-id")] token_id: u64,
+    },
+    /// Show listing details for a tokenId (read-only, no tx).
+    Show {
+        #[arg(long = "token-id")] token_id: u64,
+    },
 }
 
 fn main() {
@@ -154,6 +181,15 @@ fn main() {
         Cmd::Repair { token_id } => cmd::repair::run(&cli.server, token_id),
         Cmd::Claim { token_ids } => cmd::claim::run(&cli.server, token_ids),
         Cmd::Transfer { token_id, to } => cmd::transfer::run(&cli.server, token_id, to),
+        Cmd::Market { action } => {
+            let act = match action {
+                MarketCmd::List { token_id, price } => cmd::market::MarketAction::List { token_id, price_eth: price },
+                MarketCmd::Unlist { token_id } => cmd::market::MarketAction::Unlist { token_id },
+                MarketCmd::Buy { token_id } => cmd::market::MarketAction::Buy { token_id },
+                MarketCmd::Show { token_id } => cmd::market::MarketAction::Show { token_id },
+            };
+            cmd::market::run(&cli.server, act)
+        }
     };
     if let Err(e) = result {
         log_error!("fatal: {e:#}");

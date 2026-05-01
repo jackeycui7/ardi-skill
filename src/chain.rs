@@ -108,6 +108,32 @@ sol! {
 
 sol! {
     #[allow(missing_docs)]
+    contract ArdiOTC {
+        struct Listing {
+            address seller;
+            uint256 priceWei;
+            uint64 listedAt;
+        }
+        function list(uint256 tokenId, uint256 priceWei) external;
+        function unlist(uint256 tokenId) external;
+        function buy(uint256 tokenId) external payable;
+        function getListing(uint256 tokenId) external view returns (Listing memory);
+        function isListed(uint256 tokenId) external view returns (bool);
+    }
+}
+
+sol! {
+    #[allow(missing_docs)]
+    contract IERC721 {
+        function setApprovalForAll(address operator, bool approved) external;
+        function isApprovedForAll(address owner, address operator) external view returns (bool);
+        function getApproved(uint256 tokenId) external view returns (address);
+        function approve(address to, uint256 tokenId) external;
+    }
+}
+
+sol! {
+    #[allow(missing_docs)]
     contract IERC20 {
         function balanceOf(address account) external view returns (uint256);
         function allowance(address owner, address spender) external view returns (uint256);

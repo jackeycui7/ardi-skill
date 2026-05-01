@@ -7,6 +7,7 @@ pub mod inscribe;
 pub mod preflight;
 pub mod repair;
 pub mod reveal;
+pub mod market;
 pub mod stake;
 pub mod status;
 pub mod transfer;
