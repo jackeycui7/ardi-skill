@@ -7,7 +7,7 @@ use alloy_sol_types::SolCall;
 use serde_json::{json, Value};
 use std::time::Duration;
 
-use crate::chain::{ArdiEpochDraw, ArdiNFT};
+use crate::chain::{ArdiEpochDraw, ArdiNFT, EmissionDistributor, IERC20};
 use crate::rpc;
 use crate::wallet;
 
@@ -67,50 +67,49 @@ pub fn build_tx(
     }))
 }
 
-/// Build commit calldata.
-pub fn calldata_commit(epoch_id: u64, word_id: u64, hash: B256) -> Vec<u8> {
+/// Build commit calldata. v3: takes staker. Pass Address::ZERO for self-stake.
+pub fn calldata_commit(epoch_id: u64, word_id: u64, hash: B256, staker: Address) -> Vec<u8> {
     let call = ArdiEpochDraw::commitCall {
         epochId: U256::from(epoch_id),
         wordId: U256::from(word_id),
         hash,
+        staker,
     };
     call.abi_encode()
 }
 
-pub fn calldata_reveal(
-    epoch_id: u64,
-    word_id: u64,
-    answer: String,
-    salt: B256,
-    vault_proof: Vec<B256>,
-) -> Vec<u8> {
+/// v3 reveal — only (guess, nonce). vaultProof is server-side at publishAnswers.
+pub fn calldata_reveal(epoch_id: u64, word_id: u64, guess: String, nonce: B256) -> Vec<u8> {
     let call = ArdiEpochDraw::revealCall {
         epochId: U256::from(epoch_id),
         wordId: U256::from(word_id),
-        answer,
-        salt,
-        vaultProof: vault_proof,
+        guess,
+        nonce,
     };
     call.abi_encode()
 }
 
-pub fn calldata_inscribe(
-    epoch_id: u64,
-    word_id: u64,
-    word: String,
-    salt: B256,
-    power: u16,
-    language_id: u8,
-) -> Vec<u8> {
+/// v3 inscribe — power/lang/durability/element come from EpochDraw.getAnswer
+/// on chain; only the plaintext word is supplied (verified vs wordHash).
+pub fn calldata_inscribe(epoch_id: u64, word_id: u64, word: String) -> Vec<u8> {
     let call = ArdiNFT::inscribeCall {
-        epochId: U256::from(epoch_id),
+        epochId: epoch_id,
         wordId: U256::from(word_id),
         word,
-        salt,
-        power,
-        languageId: language_id,
     };
     call.abi_encode()
+}
+
+pub fn calldata_repair(token_id: U256) -> Vec<u8> {
+    ArdiNFT::repairCall { tokenId: token_id }.abi_encode()
+}
+
+pub fn calldata_claim(token_ids: Vec<U256>) -> Vec<u8> {
+    EmissionDistributor::claimCall { tokenIds: token_ids }.abi_encode()
+}
+
+pub fn calldata_approve(spender: Address, amount: U256) -> Vec<u8> {
+    IERC20::approveCall { spender, amount }.abi_encode()
 }
 
 /// Wait for a tx receipt up to `timeout_secs`, return success bool + block.

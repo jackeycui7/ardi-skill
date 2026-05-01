@@ -9,7 +9,7 @@
 //   6. Persist (salt, answer) to ~/.ardi-agent/state.json so reveal can recover
 
 use anyhow::{anyhow, Context, Result};
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use rand::RngCore;
 use serde_json::json;
 use std::str::FromStr;
@@ -26,6 +26,10 @@ pub struct CommitArgs {
     pub epoch_id: Option<u64>, // if None, use current
     pub word_id: u64,
     pub answer: String,
+    /// v3: explicit staker override. If None, auto-detect via the server's
+    /// `/v1/agent/{addr}/stakers` index. If still none, falls back to
+    /// `Address::ZERO`, which the contract interprets as msg.sender (self-stake).
+    pub staker: Option<Address>,
 }
 
 pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
@@ -219,18 +223,51 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Generate salt.
-    let mut salt_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut salt_bytes);
-    let salt = B256::from(salt_bytes);
+    // Generate nonce (was salt in v1; same role — randomness in commit hash).
+    let mut nonce_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let salt = B256::from(nonce_bytes);
 
-    // Hash MUST match server validation byte-for-byte.
-    let hash = chain::commit_hash(&args.answer, &salt, &agent);
+    // v3 commit hash matches: keccak(guess || msg.sender || nonce).
+    let hash = chain::commit_hash(&args.answer, &agent, &salt);
     log_info!(
         "commit: epoch={epoch_id} word={} hash=0x{}",
         args.word_id,
         hex::encode(hash)
     );
+
+    // v3: resolve staker. Explicit > auto-detected via server. If neither
+    // resolves we DO NOT silently fall back to self-stake (H-7): a
+    // KYA-delegated agent doing that would burn gas on a reverting commit.
+    // Force the user to either pass --staker or run `ardi-agent stake` to
+    // see what the chain actually shows.
+    let staker = match args.staker {
+        Some(s) => s,
+        None => match resolve_staker(&api, &agent_str)? {
+            Some(s) => s,
+            None => {
+                Output::error(
+                    format!(
+                        "No staker resolved for {agent_str}. Either you're not staked yet, \
+                         or the coordinator's staker index is behind. Run `ardi-agent stake` \
+                         to see live chain state, then re-run with `--staker 0x...` if needed."
+                    ),
+                    "STAKER_NOT_RESOLVED",
+                    "stake",
+                    true,
+                    "Run `ardi-agent stake` and retry with --staker.",
+                    Internal {
+                        next_action: "check_stake".into(),
+                        next_command: Some("ardi-agent stake".into()),
+                        ..Default::default()
+                    },
+                )
+                .print();
+                return Ok(());
+            }
+        },
+    };
+    log_info!("commit: using staker 0x{:x}", staker);
 
     // Build calldata + tx.
     let to = Address::from_str(
@@ -238,7 +275,7 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("server didn't return epoch_draw_contract"))?,
     )?;
-    let data = tx::calldata_commit(epoch_id, args.word_id, hash);
+    let data = tx::calldata_commit(epoch_id, args.word_id, hash, staker);
     let tx_obj = tx::build_tx(&agent, &to, data, tx::COMMIT_BOND_WEI, 200_000)?;
 
     let tx_hash = tx::send_and_wait(&tx_obj).context("send commit tx")?;
@@ -303,4 +340,50 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
     )
     .print();
     Ok(())
+}
+
+/// v3: ask the server's indexer which staker is backing this agent. The server
+/// scans AWPAllocator.Allocated events and returns the most recent allocation
+/// per (staker, worknet). We pick the first row whose amount >= MIN_STAKE on
+/// either Ardi or KYA worknet — that's the staker the contract will accept
+/// at commit-time eligibility check.
+///
+/// Returns Ok(None) when the server has no allocator index yet, or no
+/// matching allocation. Caller then falls back to Address::ZERO (self-stake).
+fn resolve_staker(api: &ApiClient, agent_addr: &str) -> Result<Option<Address>> {
+    const MIN_STAKE_AWP: u128 = 10_000;
+    const ONE_AWP_WEI: u128 = 1_000_000_000_000_000_000;
+    const MIN_STAKE_WEI: u128 = MIN_STAKE_AWP * ONE_AWP_WEI;
+    const ARDI_WN: &str = "845300000012";
+    const KYA_WN: &str = "845300000014";
+
+    let resp: Option<serde_json::Value> =
+        api.try_get_json(&format!("/v1/agent/{agent_addr}/stakers"))?;
+    let Some(resp) = resp else { return Ok(None); };
+    let stakers = resp.get("stakers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+
+    let agent_lower = agent_addr.to_lowercase();
+    let mut best: Option<(Address, U256)> = None;
+    for row in &stakers {
+        let wn = row.get("worknet_id").and_then(|v| v.as_str()).unwrap_or("");
+        if wn != ARDI_WN && wn != KYA_WN {
+            continue;
+        }
+        let amount_str = row.get("amount_wei").and_then(|v| v.as_str()).unwrap_or("0");
+        let amount = U256::from_str_radix(amount_str, 10).unwrap_or(U256::ZERO);
+        if amount < U256::from(MIN_STAKE_WEI) {
+            continue;
+        }
+        let staker_str = row.get("staker").and_then(|v| v.as_str()).unwrap_or("");
+        let Ok(staker) = Address::from_str(staker_str) else { continue };
+        // Prefer self-stake (staker == agent) — no delegation, simplest path.
+        if staker_str.to_lowercase() == agent_lower {
+            return Ok(Some(staker));
+        }
+        // Otherwise hold onto the highest-stake delegated row.
+        if best.as_ref().map_or(true, |(_, a)| amount > *a) {
+            best = Some((staker, amount));
+        }
+    }
+    Ok(best.map(|(s, _)| s))
 }

@@ -75,6 +75,10 @@ enum Cmd {
         word_id: u64,
         #[arg(long)]
         answer: String,
+        /// v3: explicit staker for AWP eligibility. Defaults to auto-detect
+        /// via the server (KYA-delegated agents) and falls back to self-stake.
+        #[arg(long)]
+        staker: Option<String>,
     },
     /// List local pending commits and the next action for each.
     Commits,
@@ -92,6 +96,19 @@ enum Cmd {
         #[arg(long)]
         word_id: u64,
     },
+    /// v3: refresh an NFT's durability. Pays $ardi fee + requests VRF.
+    /// 1% chance of failure → NFT becomes broken (must fuse to revive).
+    Repair {
+        #[arg(long)]
+        token_id: u64,
+    },
+    /// v3: claim accumulated $ardi rewards from EmissionDistributor.
+    /// Pass --token-id repeatedly to settle each held active NFT first;
+    /// any prior settled balance is paid out regardless.
+    Claim {
+        #[arg(long = "token-id")]
+        token_ids: Vec<u64>,
+    },
 }
 
 fn main() {
@@ -102,13 +119,29 @@ fn main() {
         Cmd::Gas => cmd::gas::run(&cli.server),
         Cmd::Status => cmd::status::run(&cli.server),
         Cmd::Context => cmd::context::run(&cli.server),
-        Cmd::Commit { epoch, word_id, answer } => cmd::commit::run(
-            &cli.server,
-            cmd::commit::CommitArgs { epoch_id: epoch, word_id, answer },
-        ),
+        Cmd::Commit { epoch, word_id, answer, staker } => {
+            let staker = match staker {
+                Some(s) => match alloy_primitives::Address::parse_checksummed(&s, None)
+                    .or_else(|_| s.parse::<alloy_primitives::Address>())
+                {
+                    Ok(a) => Some(a),
+                    Err(_) => {
+                        log_error!("--staker is not a valid 0x-address: {s}");
+                        std::process::exit(2);
+                    }
+                },
+                None => None,
+            };
+            cmd::commit::run(
+                &cli.server,
+                cmd::commit::CommitArgs { epoch_id: epoch, word_id, answer, staker },
+            )
+        }
         Cmd::Commits => cmd::commits::run(&cli.server),
         Cmd::Reveal { epoch, word_id } => cmd::reveal::run(&cli.server, epoch, word_id),
         Cmd::Inscribe { epoch, word_id } => cmd::inscribe::run(&cli.server, epoch, word_id),
+        Cmd::Repair { token_id } => cmd::repair::run(&cli.server, token_id),
+        Cmd::Claim { token_ids } => cmd::claim::run(&cli.server, token_ids),
     };
     if let Err(e) = result {
         log_error!("fatal: {e:#}");

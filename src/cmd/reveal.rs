@@ -61,55 +61,16 @@ pub fn run(server_url: &str, epoch_id: u64, word_id: u64) -> Result<()> {
         return Ok(());
     }
 
-    // Fetch the vault proof — gives us proof, leaf, root.
+    // v3 reveal needs only (guess, nonce). Vault proof was a v1/v2 artifact —
+    // those proofs are checked server-side in publishAnswers, not by reveal.
     let api = ApiClient::new(server_url)?;
-    let proof_resp: serde_json::Value = match api.get_json(&format!("/v1/vault/proof/{word_id}")) {
-        Ok(v) => v,
-        Err(e) => {
-            Output::error(
-                format!("Server proof fetch failed: {e}"),
-                "VAULT_PROOF_FETCH_FAILED",
-                "network",
-                true,
-                "Check coordinator reachability with `ardi-agent status`. Retry in 10s.",
-                Internal {
-                    next_action: "retry".into(),
-                    next_command: Some(format!(
-                        "ardi-agent reveal --epoch {epoch_id} --word-id {word_id}"
-                    )),
-                    ..Default::default()
-                },
-            )
-            .print();
-            return Ok(());
-        }
-    };
-    let proof: Vec<B256> = proof_resp
-        .get("proof")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|h| h.as_str())
-                .filter_map(|s| {
-                    let s = s.trim_start_matches("0x");
-                    hex::decode(s).ok().and_then(|b| {
-                        if b.len() == 32 {
-                            Some(B256::from_slice(&b))
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
 
     let salt_bytes = hex::decode(entry.salt_hex.trim_start_matches("0x"))
         .context("invalid salt in state — file corrupted?")?;
     if salt_bytes.len() != 32 {
         return Err(anyhow!("salt has wrong length"));
     }
-    let salt = B256::from_slice(&salt_bytes);
+    let nonce = B256::from_slice(&salt_bytes);
 
     // Fetch contract addr (and check reveal window) from current epoch row.
     let ep: serde_json::Value = api.get_json(&format!("/v1/epoch/{epoch_id}"))?;
@@ -134,7 +95,7 @@ pub fn run(server_url: &str, epoch_id: u64, word_id: u64) -> Result<()> {
         }
     };
 
-    let data = tx::calldata_reveal(epoch_id, word_id, entry.answer.clone(), salt, proof);
+    let data = tx::calldata_reveal(epoch_id, word_id, entry.answer.clone(), nonce);
     let tx_obj = tx::build_tx(&agent, &to, data, 0, 250_000)?;
     let tx_hash = match tx::send_and_wait(&tx_obj) {
         Ok(h) => h,

@@ -1,17 +1,22 @@
 // stake — show on-chain stake status across both Ardi + KYA worknets.
 //
-// READS LIVE FROM CHAIN — not from the coordinator's API. The coordinator
-// only knows about mints; eligibility is enforced on-chain at every
-// commit() against AWPRegistry.getAgentInfo, so the truth lives there.
+// v3: queries AWPAllocator directly (was AWPRegistry in v0.1.x). The registry's
+// getAgentInfo only surfaces stake when the agent has called bind(staker),
+// which KYA-delegated agents never do. AWPAllocator.getAgentStake takes the
+// staker explicitly, so we ask the server's indexer (`/v1/agent/{addr}/stakers`)
+// for all known stakers backing this agent and check each one. Self-stake
+// is checked too as a degenerate case (staker == agent).
 
 use anyhow::Result;
 use alloy_primitives::{Address, U256};
 use alloy_sol_types::SolCall;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use crate::auth::get_address;
-use crate::chain::AWPRegistry;
+use crate::chain::AWPAllocator;
+use crate::client::ApiClient;
 use crate::output::{Internal, Output};
 use crate::tx;
 
@@ -19,80 +24,137 @@ const ARDI_WORKNET_ID: &str = "845300000012";
 const KYA_WORKNET_ID: &str = "845300000014";
 const VE_AWP: &str = "0x0000b534C63D78212f1BDCc315165852793A00A8";
 const AWP_ALLOCATOR: &str = "0x0000D6BB5e040E35081b3AaF59DD71b21C9800AA";
-const AWP_REGISTRY: &str = "0x0000F34Ed3594F54faABbCb2Ec45738DDD1c001A";
 const MIN_STAKE_AWP: u128 = 10_000;
 const ONE_AWP_WEI: u128 = 1_000_000_000_000_000_000;
 
-struct StakeOnWorknet {
-    is_valid: bool,
-    stake_awp: f64,
+#[derive(Debug, Clone)]
+struct CheckedAlloc {
+    staker: Address,
+    worknet: String,
     stake_wei: U256,
+    stake_awp: f64,
+    passes: bool,
 }
 
-fn read_stake(agent: Address, worknet_id_str: &str) -> Result<StakeOnWorknet> {
-    let registry = Address::from_str(AWP_REGISTRY)?;
+fn read_alloc(staker: Address, agent: Address, worknet_id_str: &str) -> Result<U256> {
+    let allocator = Address::from_str(AWP_ALLOCATOR)?;
     let wn = U256::from_str_radix(worknet_id_str, 10)?;
-    let call = AWPRegistry::getAgentInfoCall { agent, worknetId: wn };
-    let raw = tx::view_call(&registry, call.abi_encode())?;
-    let decoded = AWPRegistry::getAgentInfoCall::abi_decode_returns(&raw, true)?;
-    let stake_wei = decoded.stake;
-    let stake_awp = (stake_wei.to::<u128>() as f64) / (ONE_AWP_WEI as f64);
-    Ok(StakeOnWorknet {
-        is_valid: decoded.isValid,
-        stake_awp,
-        stake_wei,
-    })
+    let call = AWPAllocator::getAgentStakeCall {
+        staker,
+        agent,
+        worknetId: wn,
+    };
+    let raw = tx::view_call(&allocator, call.abi_encode())?;
+    let decoded = AWPAllocator::getAgentStakeCall::abi_decode_returns(&raw, true)?;
+    Ok(decoded._0)
 }
 
-pub fn run(_server_url: &str) -> Result<()> {
+pub fn run(server_url: &str) -> Result<()> {
     let address_str = get_address()?;
-    let address = Address::from_str(&address_str)?;
+    let agent = Address::from_str(&address_str)?;
     let min_stake_wei = U256::from(MIN_STAKE_AWP) * U256::from(ONE_AWP_WEI);
 
-    let ardi = read_stake(address, ARDI_WORKNET_ID)?;
-    let kya  = read_stake(address, KYA_WORKNET_ID)?;
+    // Build the candidate staker set:
+    //   - self (agent itself, for the self-stake path)
+    //   - every staker the indexer has seen allocate to this agent
+    let mut stakers: BTreeMap<String, Address> = BTreeMap::new();
+    stakers.insert(format!("0x{:x}", agent), agent);
 
-    let ardi_ok = ardi.is_valid && ardi.stake_wei >= min_stake_wei;
-    let kya_ok  = kya.is_valid  && kya.stake_wei  >= min_stake_wei;
-    let eligible = ardi_ok || kya_ok;
+    let api = ApiClient::new(server_url)?;
+    if let Ok(Some(resp)) =
+        api.try_get_json::<serde_json::Value>(&format!("/v1/agent/{address_str}/stakers"))
+    {
+        if let Some(arr) = resp.get("stakers").and_then(|v| v.as_array()) {
+            for row in arr {
+                if let Some(s) = row.get("staker").and_then(|v| v.as_str()) {
+                    if let Ok(addr) = Address::from_str(s) {
+                        stakers.insert(format!("0x{:x}", addr), addr);
+                    }
+                }
+            }
+        }
+    }
 
-    let path_taken = if ardi_ok { "ardi (self-stake)" }
-                     else if kya_ok { "kya (delegated)" }
-                     else { "neither" };
+    // Probe each (staker, worknet) pair.
+    let mut allocs = Vec::new();
+    for (_, &staker) in &stakers {
+        for wn in [ARDI_WORKNET_ID, KYA_WORKNET_ID] {
+            let stake_wei = read_alloc(staker, agent, wn).unwrap_or(U256::ZERO);
+            if stake_wei == U256::ZERO {
+                continue;
+            }
+            let stake_awp = (stake_wei.to::<u128>() as f64) / (ONE_AWP_WEI as f64);
+            allocs.push(CheckedAlloc {
+                staker,
+                worknet: wn.to_string(),
+                stake_wei,
+                stake_awp,
+                passes: stake_wei >= min_stake_wei,
+            });
+        }
+    }
+
+    let passing: Vec<&CheckedAlloc> = allocs.iter().filter(|a| a.passes).collect();
+    let eligible = !passing.is_empty();
 
     let mut lines = vec![
         format!("Agent:                  {address_str}"),
         format!("Threshold (each path):  {} AWP", MIN_STAKE_AWP),
-        format!(
-            "Ardi worknet  ({}):  {:.2} AWP  →  {}",
-            ARDI_WORKNET_ID,
-            ardi.stake_awp,
-            if ardi_ok { "✓ PASSES" } else { "✗ below threshold" }
-        ),
-        format!(
-            "KYA worknet   ({}):  {:.2} AWP  →  {}",
-            KYA_WORKNET_ID,
-            kya.stake_awp,
-            if kya_ok { "✓ PASSES" } else { "✗ below threshold" }
-        ),
-        format!(
-            "Status:                 {}",
-            if eligible { format!("✓ ELIGIBLE (via {path_taken})") } else { "✗ NOT ELIGIBLE".into() }
-        ),
     ];
+    if allocs.is_empty() {
+        lines.push("No allocations found across known stakers.".into());
+    } else {
+        for a in &allocs {
+            let wn_label = if a.worknet == ARDI_WORKNET_ID {
+                "Ardi"
+            } else {
+                "KYA "
+            };
+            lines.push(format!(
+                "{wn_label} ({})  staker=0x{:x}  stake={:.2} AWP  →  {}",
+                a.worknet,
+                a.staker,
+                a.stake_awp,
+                if a.passes { "PASSES" } else { "below threshold" }
+            ));
+        }
+    }
+    lines.push(format!(
+        "Status:                 {}",
+        if eligible {
+            "ELIGIBLE"
+        } else {
+            "NOT ELIGIBLE"
+        }
+    ));
 
     if eligible {
+        let chosen = passing[0];
+        let path = if chosen.staker == agent {
+            "self-stake".to_string()
+        } else {
+            format!("delegated by 0x{:x}", chosen.staker)
+        };
         lines.push(String::new());
-        lines.push("You're staked. Run `ardi-agent preflight` to confirm full readiness.".into());
+        lines.push(format!("Use --staker 0x{:x} on commit (or auto-detect via the skill).", chosen.staker));
+        lines.push("Run `ardi-agent preflight` to confirm full readiness.".into());
+
         Output::success(
             lines.join("\n"),
             json!({
                 "address": address_str,
                 "eligible": true,
-                "via": path_taken,
-                "ardi_stake_awp": ardi.stake_awp,
-                "kya_stake_awp": kya.stake_awp,
+                "via": path,
+                "chosen_staker": format!("0x{:x}", chosen.staker),
+                "chosen_worknet_id": chosen.worknet,
+                "chosen_stake_awp": chosen.stake_awp,
                 "min_stake_awp": MIN_STAKE_AWP,
+                "all_allocations": allocs.iter().map(|a| json!({
+                    "staker": format!("0x{:x}", a.staker),
+                    "worknet_id": a.worknet,
+                    "stake_awp": a.stake_awp,
+                    "passes": a.passes,
+                })).collect::<Vec<_>>(),
             }),
             Internal {
                 next_action: "ready".into(),
@@ -104,54 +166,40 @@ pub fn run(_server_url: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Below threshold on both. Tell the agent precisely which threshold
-    // they failed and how much more is needed on whichever path is closer.
-    let ardi_short = (MIN_STAKE_AWP as f64) - ardi.stake_awp;
-    let kya_short  = (MIN_STAKE_AWP as f64) - kya.stake_awp;
-    lines.push(String::new());
-    lines.push("RULE: passing EITHER worknet's threshold makes you eligible.".into());
-    lines.push(format!(
-        "      Ardi shortfall: {ardi_short:.2} AWP   ·   KYA shortfall: {kya_short:.2} AWP"
-    ));
+    // Not eligible — print guidance for self-stake or delegated paths.
     lines.push(String::new());
     lines.push("To become eligible — pick whichever path is shorter for you:".into());
     lines.push(String::new());
-    lines.push("──── [A] Self-stake on Ardi worknet ────".into());
+    lines.push("[A] Self-stake on Ardi worknet".into());
     lines.push("    https://awp.pro/staking".into());
     lines.push(format!(
-        "    Connect your wallet, lock ≥{} AWP, and allocate to:", MIN_STAKE_AWP
+        "    Connect your wallet, lock >= {} AWP, allocate to:",
+        MIN_STAKE_AWP
     ));
     lines.push(format!("      agent: {address_str}"));
-    lines.push(format!("      worknetId: {ARDI_WORKNET_ID}  (Ardi)"));
+    lines.push(format!("      worknetId: {ARDI_WORKNET_ID} (Ardi)"));
     lines.push(String::new());
-    lines.push("──── [B] KYA delegated path (also accepted by Ardi — same threshold) ────".into());
+    lines.push("[B] KYA delegated path (also accepted by Ardi).".into());
     lines.push("    https://kya.link/".into());
     lines.push(format!(
         "    KYA verifies you on Twitter and sponsors stake into worknet {KYA_WORKNET_ID}."
     ));
-    lines.push(format!(
-        "    Sponsorship size depends on KYA's policy; if you only got partial"
-    ));
-    lines.push(format!(
-        "    (e.g. 6,000 of {} required), you must still self-top-up the remainder", MIN_STAKE_AWP
-    ));
-    lines.push(format!(
-        "    on the same KYA worknet ({KYA_WORKNET_ID}) OR fully self-stake on Ardi (path A)."
-    ));
     lines.push(String::new());
-    lines.push("──── [C] Programmatic — direct contract calls (advanced) ────".into());
+    lines.push("[C] Programmatic — direct AWPAllocator.allocate (advanced)".into());
     lines.push("    Base mainnet (chainId 8453):".into());
     lines.push(format!(
-        "    1) veAWP.deposit(amount={}e18, lockDuration)", MIN_STAKE_AWP
+        "      veAWP.deposit(amount={}e18, lockDuration)",
+        MIN_STAKE_AWP
     ));
-    lines.push(format!("       contract: {VE_AWP}"));
+    lines.push(format!("        contract: {VE_AWP}"));
     lines.push(format!(
-        "    2) AWPAllocator.allocate(staker=you, agent={address_str},"
+        "      AWPAllocator.allocate(staker=you, agent={address_str},"
     ));
     lines.push(format!(
-        "                              worknetId=<ARDI or KYA>, amount={}e18)", MIN_STAKE_AWP
+        "                            worknetId=<ARDI or KYA>, amount={}e18)",
+        MIN_STAKE_AWP
     ));
-    lines.push(format!("       contract: {AWP_ALLOCATOR}"));
+    lines.push(format!("        contract: {AWP_ALLOCATOR}"));
     lines.push(String::new());
     lines.push("After staking, wait ~10s, then re-run: ardi-agent stake".into());
 
@@ -167,16 +215,15 @@ pub fn run(_server_url: &str) -> Result<()> {
             "via": null,
             "ardi_worknet_id": ARDI_WORKNET_ID,
             "kya_worknet_id":  KYA_WORKNET_ID,
-            "ardi_stake_awp":  ardi.stake_awp,
-            "kya_stake_awp":   kya.stake_awp,
             "min_stake_awp":   MIN_STAKE_AWP,
-            "ardi_shortfall_awp": ardi_short.max(0.0),
-            "kya_shortfall_awp":  kya_short.max(0.0),
-            "ardi_path_isvalid": ardi.is_valid,
-            "kya_path_isvalid":  kya.is_valid,
             "ve_awp_contract":      VE_AWP,
             "awp_allocator_contract": AWP_ALLOCATOR,
-            "awp_registry_contract": AWP_REGISTRY,
+            "all_allocations": allocs.iter().map(|a| json!({
+                "staker": format!("0x{:x}", a.staker),
+                "worknet_id": a.worknet,
+                "stake_awp": a.stake_awp,
+                "passes": a.passes,
+            })).collect::<Vec<_>>(),
         }),
         Internal {
             next_action: "stake_required".into(),

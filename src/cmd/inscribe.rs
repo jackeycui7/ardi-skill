@@ -147,17 +147,10 @@ pub fn run(server_url: &str, epoch_id: u64, word_id: u64) -> Result<()> {
         return Ok(());
     }
 
-    // 2. We won — call inscribe.
-    let salt_bytes = hex::decode(entry.salt_hex.trim_start_matches("0x"))?;
-    let salt = alloy_primitives::B256::from_slice(&salt_bytes);
-    let data = tx::calldata_inscribe(
-        epoch_id,
-        word_id,
-        entry.answer.clone(),
-        salt,
-        entry.power,
-        entry.language_id,
-    );
+    // 2. We won — call inscribe. v3: only (epoch, wordId, word). Power +
+    // language + maxDurability + element are read from EpochDraw.getAnswer
+    // by the contract itself.
+    let data = tx::calldata_inscribe(epoch_id, word_id, entry.answer.clone());
     let tx_obj = tx::build_tx(&agent, &nft_addr, data, 0, 350_000)?;
     let tx_hash = tx::send_and_wait(&tx_obj).context("send inscribe tx")?;
 
