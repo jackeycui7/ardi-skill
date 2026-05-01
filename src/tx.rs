@@ -112,6 +112,10 @@ pub fn calldata_approve(spender: Address, amount: U256) -> Vec<u8> {
     IERC20::approveCall { spender, amount }.abi_encode()
 }
 
+pub fn calldata_transfer_nft(from: Address, to: Address, token_id: U256) -> Vec<u8> {
+    ArdiNFT::transferFromCall { from, to, tokenId: token_id }.abi_encode()
+}
+
 /// Wait for a tx receipt up to `timeout_secs`, return success bool + block.
 pub fn wait_receipt(tx_hash: &str, timeout_secs: u64) -> Result<(bool, u64)> {
     let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);

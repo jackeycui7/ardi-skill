@@ -68,6 +68,13 @@ sol! {
         // v3 inscribe — only (epoch, wordId, word). Power, lang, durability,
         // element are sourced from EpochDraw.getAnswer on chain.
         function inscribe(uint64 epochId, uint256 wordId, string word) external;
+        // ERC721 transfer — used by `ardi-agent transfer` to move NFTs from
+        // the agent's wallet to the user's main wallet (e.g. MetaMask) so
+        // they can repair / claim from the browser instead of CLI. Reverts
+        // with `TokenLocked` if the NFT has a pending repair or fuse VRF.
+        function transferFrom(address from, address to, uint256 tokenId) external;
+        function pendingRepairOf(uint256 tokenId) external view returns (uint256);
+        function pendingFuseOf(uint256 tokenId) external view returns (uint256);
         // v3 repair — pay fee + request VRF. Returns the requestId.
         function repair(uint256 tokenId) external returns (uint256);
         function repairFee(uint256 tokenId) external view returns (uint256);

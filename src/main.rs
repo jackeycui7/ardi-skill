@@ -109,6 +109,17 @@ enum Cmd {
         #[arg(long = "token-id")]
         token_ids: Vec<u64>,
     },
+    /// v3: transfer an Ardinal NFT from the agent's wallet to another
+    /// address (typically the user's MetaMask / main wallet) so the new
+    /// owner can repair / claim from the browser. Reverts up-front if a
+    /// repair or fuse VRF request is in flight against the token.
+    Transfer {
+        #[arg(long = "token-id")]
+        token_id: u64,
+        /// Target address (0x…40-hex). Usually the user's main wallet.
+        #[arg(long)]
+        to: String,
+    },
 }
 
 fn main() {
@@ -142,6 +153,7 @@ fn main() {
         Cmd::Inscribe { epoch, word_id } => cmd::inscribe::run(&cli.server, epoch, word_id),
         Cmd::Repair { token_id } => cmd::repair::run(&cli.server, token_id),
         Cmd::Claim { token_ids } => cmd::claim::run(&cli.server, token_ids),
+        Cmd::Transfer { token_id, to } => cmd::transfer::run(&cli.server, token_id, to),
     };
     if let Err(e) = result {
         log_error!("fatal: {e:#}");

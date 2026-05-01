@@ -9,3 +9,4 @@ pub mod repair;
 pub mod reveal;
 pub mod stake;
 pub mod status;
+pub mod transfer;
