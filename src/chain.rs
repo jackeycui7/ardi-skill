@@ -5,9 +5,16 @@
 // Whenever the server's abi.rs changes (struct fields, function selectors,
 // event signatures), MIRROR THE CHANGES HERE.
 //
-// LAST SYNCED: 2026-05-01 (v3 contracts: NFT v3 + EmissionDistributor + EpochDraw v3)
+// LAST SYNCED: 2026-05-02 (v3.1 contracts: leaf encoding switched to abi.encode,
+//              AnswerData gained themeHash + elementHash, element max raised
+//              5→6 for god-tier, ArdiNFTv3 ELEMENT_MAX bumped to 6).
 // SOURCE     : /root/awp_code/ardi/coord-rs/crates/ardi-chain/src/abi.rs
 //              + /root/awp_code/ardi/contracts-v2/src/v3/*.sol
+//
+// Skill never calls publishAnswer (only the coordinator does), so AnswerData
+// + vault_leaf are intentionally NOT mirrored here. Skill's hot path is:
+//   commit() → reveal() → inscribe() — the structs and leaf encoding for
+// vault Merkle proof live entirely server-side / on-chain.
 // ============================================================================
 
 use alloy_primitives::{Address, B256, U256};
@@ -16,15 +23,6 @@ use alloy_sol_types::sol;
 sol! {
     #[allow(missing_docs)]
     contract ArdiEpochDraw {
-        struct AnswerData {
-            uint256 wordId;
-            bytes32 wordHash;
-            uint16 power;
-            uint8 languageId;
-            uint8 maxDurability;
-            uint8 element;
-            bytes32[] vaultProof;
-        }
 
         function epochs(uint256 epochId) external view returns (
             uint64 startTs,
@@ -167,31 +165,9 @@ pub fn commit_hash(answer: &str, agent: &Address, nonce: &B256) -> B256 {
     B256::from_slice(&h.finalize())
 }
 
-/// v3 vault Merkle leaf =
-///   keccak256(abi.encodePacked(
-///     uint256 wordId, bytes32 keccak(word),
-///     uint16 power, uint8 languageId,
-///     uint8 maxDurability, uint8 element
-///   ))
-pub fn vault_leaf(
-    word_id: U256,
-    word: &str,
-    power: u16,
-    language_id: u8,
-    max_durability: u8,
-    element: u8,
-) -> B256 {
-    let word_hash = Keccak256::digest(word.as_bytes());
-    let mut h = Keccak256::new();
-    let word_id_be: [u8; 32] = word_id.to_be_bytes::<32>();
-    h.update(word_id_be);
-    h.update(word_hash);
-    h.update(power.to_be_bytes());
-    h.update([language_id]);
-    h.update([max_durability]);
-    h.update([element]);
-    B256::from_slice(&h.finalize())
-}
+// vault_leaf removed in v3.1: skill never builds vault Merkle proofs. The
+// coordinator publishes answers; agents only commit/reveal/inscribe. The
+// canonical leaf lives in coord-rs/ardi-core/src/vault.rs::vault_leaf.
 
 #[cfg(test)]
 mod tests {
