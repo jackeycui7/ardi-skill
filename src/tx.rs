@@ -158,9 +158,31 @@ pub fn wait_receipt(tx_hash: &str, timeout_secs: u64) -> Result<(bool, u64)> {
     }
 }
 
-/// Send + wait. Returns (tx_hash, success).
+/// Send + actually wait for the receipt and confirm `status == 0x1`.
+///
+/// Pre-v0.5.6 this was a lie — it just returned the broadcast hash,
+/// never polled the receipt. Effect: a tx that reverted on chain
+/// (e.g. CommitWindowClosed) returned "Ok" to commit.rs, which then
+/// persisted local state as if the commit landed. User saw
+/// "✓ committed" + tx hash, but on-chain commits[] was empty.
+///
+/// Now: poll eth_getTransactionReceipt up to RECEIPT_TIMEOUT_SEC.
+/// If status != 0x1, return Err with the revert info — caller's `?`
+/// propagates the failure and DOESN'T persist the optimistic state.
 pub fn send_and_wait(tx: &Value) -> Result<String> {
+    const RECEIPT_TIMEOUT_SEC: u64 = 90;
     let hash = wallet::send_tx(tx)?;
+    let (success, block) = wait_receipt(&hash, RECEIPT_TIMEOUT_SEC)
+        .with_context(|| format!("wait_receipt({hash})"))?;
+    if !success {
+        return Err(anyhow!(
+            "tx {hash} REVERTED on chain (block {block}). \
+             Skill state NOT persisted. Common causes: CommitWindowClosed, \
+             InsufficientStake, AlreadyCommitted, EpochUnknown. Decode revert \
+             selector with: cast call <to> <input> --from <agent> --rpc-url \
+             https://mainnet.base.org"
+        ));
+    }
     Ok(hash)
 }
 
