@@ -52,8 +52,9 @@ impl WalletStatus {
                 if out.status.success() {
                     let txt = String::from_utf8_lossy(&out.stdout);
                     if let Ok(v) = serde_json::from_str::<Value>(&txt) {
-                        // awp-wallet v1.4 returns {"eoaAddress":"0x..."}.
-                        // Older versions returned {"address":"0x..."}; honor both.
+                        // awp-wallet returns {"eoaAddress":"0x..."} (current
+                        // schema); older builds returned {"address":"0x..."}.
+                        // Accept both — no minimum version required.
                         if let Some(addr) = v
                             .get("eoaAddress")
                             .or_else(|| v.get("address"))
@@ -142,8 +143,9 @@ fn resolve_private_key() -> Result<String> {
           cd ~/awp-wallet && bash install.sh && awp-wallet setup`",
     )?;
     log_debug!("resolve_private_key: shelling out to awp-wallet export-private-key");
-    // awp-wallet v1.4 returns {"privateKey":"0x...","address":"0x...","warning":"..."}
-    // immediately, no confirm prompt — wallet is unlocked-by-default in v1.x.
+    // awp-wallet returns {"privateKey":"0x...","address":"0x...","warning":"..."}
+    // immediately, no confirm prompt — wallet is unlocked-by-default. Both
+    // "privateKey" and "private_key" snake_case shapes are accepted below.
     let out = Command::new(&bin)
         .arg("export-private-key")
         .output()

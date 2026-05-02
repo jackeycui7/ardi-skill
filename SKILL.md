@@ -76,7 +76,7 @@ metadata:
       wallet_bridge:
         no_direct_key_access: false  # Skill calls awp-wallet export-private-key, holds key in process memory just long enough to sign one tx
         contract_allowlist: false    # Skill talks ONLY to ArdiNFT + ArdiEpochDraw on Base mainnet 8453; addresses are compiled into the binary
-        session_token_only: false    # awp-wallet v1.4 unlocked-by-default; no session token model
+        session_token_only: false    # awp-wallet is unlocked-by-default; no session token model
 ---
 
 # Ardi WorkNet Skill
