@@ -147,6 +147,101 @@ sol! {
     }
 }
 
+// ── Swap routers used by `ardi-agent buy-and-stake` ──
+// ETH→USDC: Uniswap V3 SwapRouter02 (handles native ETH via msg.value
+// when tokenIn == WETH).
+// USDC→AWP: Aerodrome Slipstream CL router (the existing AWP pool's
+// liquidity is on Aerodrome, not Uniswap).
+sol! {
+    #[allow(missing_docs)]
+    contract UniV3SwapRouter02 {
+        struct ExactInputSingleParams {
+            address tokenIn;
+            address tokenOut;
+            uint24 fee;
+            address recipient;
+            uint256 amountIn;
+            uint256 amountOutMinimum;
+            uint160 sqrtPriceLimitX96;
+        }
+        function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut);
+    }
+
+    #[allow(missing_docs)]
+    contract UniV3QuoterV2 {
+        struct QuoteExactInputSingleParams {
+            address tokenIn;
+            address tokenOut;
+            uint256 amountIn;
+            uint24 fee;
+            uint160 sqrtPriceLimitX96;
+        }
+        function quoteExactInputSingle(QuoteExactInputSingleParams params)
+            external returns (
+                uint256 amountOut,
+                uint160 sqrtPriceX96After,
+                uint32 initializedTicksCrossed,
+                uint256 gasEstimate
+            );
+    }
+
+    #[allow(missing_docs)]
+    contract AeroCLSwapRouter {
+        struct ExactInputSingleParams {
+            address tokenIn;
+            address tokenOut;
+            int24 tickSpacing;
+            address recipient;
+            uint256 deadline;
+            uint256 amountIn;
+            uint256 amountOutMinimum;
+            uint160 sqrtPriceLimitX96;
+        }
+        function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut);
+    }
+
+    #[allow(missing_docs)]
+    contract AeroCLQuoter {
+        struct QuoteExactInputSingleParams {
+            address tokenIn;
+            address tokenOut;
+            uint256 amountIn;
+            int24 tickSpacing;
+            uint160 sqrtPriceLimitX96;
+        }
+        function quoteExactInputSingle(QuoteExactInputSingleParams params)
+            external returns (
+                uint256 amountOut,
+                uint160 sqrtPriceX96After,
+                uint32 initializedTicksCrossed,
+                uint256 gasEstimate
+            );
+    }
+
+    #[allow(missing_docs)]
+    contract AeroCLPool {
+        function tickSpacing() external view returns (int24);
+    }
+}
+
+// ── veAWP — lock AWP to receive voting power ──
+// Used by `buy-and-stake` to lock the bought AWP for the user-chosen
+// duration before allocating to the agent. Top-up of an existing
+// position uses addToPosition(tokenId, amount, newLockSeconds).
+sol! {
+    #[allow(missing_docs)]
+    contract VeAWP {
+        function deposit(uint256 amount, uint64 lockSeconds) external;
+        function balanceOf(address owner) external view returns (uint256);
+        function tokenOfOwnerByIndex(address owner, uint256 index) external view returns (uint256);
+    }
+
+    #[allow(missing_docs)]
+    contract AWPAllocatorWrite {
+        function allocate(address staker, address agent, uint256 worknetId, uint256 amount) external;
+    }
+}
+
 // ============================================================================
 // Hash helpers — these MUST match the server side byte-for-byte.
 // ============================================================================

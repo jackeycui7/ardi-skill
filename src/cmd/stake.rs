@@ -198,40 +198,33 @@ pub fn run(_server_url: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Not eligible — print guidance for self-stake or delegated paths.
+    // Not eligible — print 3 paths in recommendation order. KYA first
+    // (zero-AWP path, easiest); buy-and-stake second (one command for
+    // anyone with ETH); manual self-stake last (existing AWP holders).
     lines.push(String::new());
-    lines.push("To become eligible — pick whichever path is shorter for you:".into());
+    lines.push("Pick a path (in order of recommendation):".into());
     lines.push(String::new());
-    lines.push("[A] Self-stake on Ardi worknet".into());
+    lines.push("[A] 🟢 KYA delegated stake — easiest, no AWP needed".into());
+    lines.push("    https://kya.link/".into());
+    lines.push("    Tweet your agent address, KYA verifies on Twitter and sponsors".into());
+    lines.push(format!(
+        "    {} AWP into worknet {KYA_WORKNET_ID}. Wait 1-24h.",
+        min_stake_awp
+    ));
+    lines.push(String::new());
+    lines.push("[B] 🟢 One-click buy + auto-stake — for users with ETH".into());
+    lines.push("    Recommended: top up ~0.01 ETH (≈ $30-40) to your agent, then run:".into());
+    lines.push("        ardi-agent buy-and-stake".into());
+    lines.push("    Skill quotes ETH→USDC→AWP on-chain (Uniswap V3 + Aerodrome),".into());
+    lines.push("    then auto-locks into veAWP and allocates to your agent.".into());
+    lines.push(format!("    Your agent address: {address_str}"));
+    lines.push(String::new());
+    lines.push("[C] ⚪ Manual self-stake — if you already hold AWP".into());
     lines.push("    https://awp.pro/staking".into());
     lines.push(format!(
-        "    Connect your wallet, lock >= {} AWP, allocate to:",
-        min_stake_awp
-    ));
+        "    Connect wallet, lock >= {} AWP, allocate to:", min_stake_awp));
     lines.push(format!("      agent: {address_str}"));
     lines.push(format!("      worknetId: {ARDI_WORKNET_ID} (Ardi)"));
-    lines.push(String::new());
-    lines.push("[B] KYA delegated path (also accepted by Ardi).".into());
-    lines.push("    https://kya.link/".into());
-    lines.push(format!(
-        "    KYA verifies you on Twitter and sponsors stake into worknet {KYA_WORKNET_ID}."
-    ));
-    lines.push(String::new());
-    lines.push("[C] Programmatic — direct AWPAllocator.allocate (advanced)".into());
-    lines.push("    Base mainnet (chainId 8453):".into());
-    lines.push(format!(
-        "      veAWP.deposit(amount={}e18, lockDuration)",
-        min_stake_awp
-    ));
-    lines.push(format!("        contract: {VE_AWP}"));
-    lines.push(format!(
-        "      AWPAllocator.allocate(staker=you, agent={address_str},"
-    ));
-    lines.push(format!(
-        "                            worknetId=<ARDI or KYA>, amount={}e18)",
-        min_stake_awp
-    ));
-    lines.push(format!("        contract: {AWP_ALLOCATOR}"));
     lines.push(String::new());
     lines.push("After staking, wait ~10s, then re-run: ardi-agent stake".into());
 

@@ -1,3 +1,4 @@
+pub mod buy_and_stake;
 pub mod claim;
 pub mod commit;
 pub mod commits;

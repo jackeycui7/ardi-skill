@@ -60,6 +60,22 @@ enum Cmd {
     Preflight,
     /// Show stake status + 3-path eligibility guidance.
     Stake,
+    /// One-command path: ETH → AWP swap (Uniswap V3 → Aerodrome CL),
+    /// then auto-lock into veAWP and allocate to your agent.
+    /// Recommended for new users with ETH but no AWP. Topping up an
+    /// existing balance ("补差额") is the default — only buys what's
+    /// missing to reach minStake.
+    BuyAndStake {
+        /// Lock duration in days (default 3, max 1460 = 4 years).
+        #[arg(long = "lock-days")]
+        lock_days: Option<u32>,
+        /// Slippage in basis points (default 300 = 3%).
+        #[arg(long = "slippage")]
+        slippage_bps: Option<u32>,
+        /// Skip the confirmation prompt (for unattended / scripted use).
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Show Base ETH balance + refill guidance.
     Gas,
     /// Combined view: wallet, AWP reg, ETH, coordinator, agent state.
@@ -155,6 +171,10 @@ fn main() {
     let result = match cli.cmd {
         Cmd::Preflight => cmd::preflight::run(&cli.server),
         Cmd::Stake => cmd::stake::run(&cli.server),
+        Cmd::BuyAndStake { lock_days, slippage_bps, yes } => cmd::buy_and_stake::run(
+            &cli.server,
+            cmd::buy_and_stake::BuyAndStakeArgs { lock_days, slippage_bps, yes },
+        ),
         Cmd::Gas => cmd::gas::run(&cli.server),
         Cmd::Status => cmd::status::run(&cli.server),
         Cmd::Context => cmd::context::run(&cli.server),
