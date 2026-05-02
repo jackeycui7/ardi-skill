@@ -13,14 +13,18 @@ jobs:
     strategy:
       matrix:
         include:
+          # Pin to ubuntu-22.04 (GLIBC 2.35) instead of ubuntu-latest
+          # (currently 24.04, GLIBC 2.39). 22.04's GLIBC covers any
+          # Linux distro from ~2022 onward — older systems should use
+          # the -musl binary which has no GLIBC dependency at all.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             name: ardi-agent-linux-x86_64
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+            os: ubuntu-22.04
             name: ardi-agent-linux-x86_64-musl
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             name: ardi-agent-linux-aarch64
           - target: x86_64-apple-darwin
             os: macos-latest
