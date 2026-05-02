@@ -62,6 +62,13 @@ pub struct BuyAndStakeArgs {
     pub slippage_bps: Option<u32>,
     pub yes: bool,        // skip confirmation prompt (use defaults)
     pub quote_only: bool, // dry-quote, no tx, structured JSON for the LLM
+    /// Override the auto-computed shortfall — buy this many AWP unconditionally.
+    /// Useful for testing the swap path independently when wallet already has
+    /// enough AWP, or for buying extra to allocate to MULTIPLE agents.
+    pub buy_amount_awp: Option<u128>,
+    /// Skip the staking phase entirely. With `--buy-amount`, this turns
+    /// the command into a pure swap (no lock, no allocate).
+    pub no_stake: bool,
 }
 
 pub fn run(_server_url: &str, args: BuyAndStakeArgs) -> Result<()> {
@@ -80,10 +87,13 @@ pub fn run(_server_url: &str, args: BuyAndStakeArgs) -> Result<()> {
          threshold_awp={min_stake_awp:.0} slippage_bps={slip_bps}"
     );
 
-    let need_wei = if awp_balance_wei >= min_stake_wei {
-        U256::ZERO
-    } else {
-        min_stake_wei - awp_balance_wei
+    // Determine purchase amount.
+    // Default: shortfall to minStake (compete buy-and-stake intent).
+    // Override: --buy-amount X forces an unconditional buy of X AWP.
+    let need_wei = match args.buy_amount_awp {
+        Some(awp) => U256::from(awp) * U256::from(ONE_AWP_WEI),
+        None if awp_balance_wei >= min_stake_wei => U256::ZERO,
+        None => min_stake_wei - awp_balance_wei,
     };
     let need_awp = wei_to_awp_f(need_wei);
 
@@ -127,6 +137,25 @@ pub fn run(_server_url: &str, args: BuyAndStakeArgs) -> Result<()> {
     } else {
         println!("✓ AWP balance already meets threshold ({:.4} >= {:.0}) — skipping swap",
             awp_balance_awp, min_stake_awp);
+    }
+
+    // ── 2c. Skip stake phase (--no-stake, swap-only mode) ────────────
+    if args.no_stake {
+        Output::success(
+            format!("✓ swap done ({} AWP); --no-stake set, skipping lock + allocate", min_stake_awp),
+            json!({
+                "agent": agent_str,
+                "buy_amount_awp": args.buy_amount_awp.unwrap_or(0),
+                "no_stake": true,
+            }),
+            Internal {
+                next_action: "manual_stake_or_done".into(),
+                next_command: Some("ardi-agent stake".into()),
+                ..Default::default()
+            },
+        )
+        .print();
+        return Ok(());
     }
 
     // ── 3. Lock duration prompt ──────────────────────────────────────

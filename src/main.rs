@@ -81,6 +81,15 @@ enum Cmd {
         /// --quote (with --yes --lock-days N) to execute.
         #[arg(long)]
         quote: bool,
+        /// Buy this many AWP unconditionally (override the auto-shortfall).
+        /// Useful for testing the swap independently when the wallet
+        /// already meets minStake. Combine with --no-stake to swap only.
+        #[arg(long = "buy-amount")]
+        buy_amount: Option<u128>,
+        /// Skip the lock + allocate phase. Run only the swap. Pair with
+        /// --buy-amount to swap a specific amount without staking.
+        #[arg(long = "no-stake")]
+        no_stake: bool,
     },
     /// Show Base ETH balance + refill guidance.
     Gas,
@@ -177,15 +186,18 @@ fn main() {
     let result = match cli.cmd {
         Cmd::Preflight => cmd::preflight::run(&cli.server),
         Cmd::Stake => cmd::stake::run(&cli.server),
-        Cmd::BuyAndStake { lock_days, slippage_bps, yes, quote } => cmd::buy_and_stake::run(
-            &cli.server,
-            cmd::buy_and_stake::BuyAndStakeArgs {
-                lock_days,
-                slippage_bps,
-                yes,
-                quote_only: quote,
-            },
-        ),
+        Cmd::BuyAndStake { lock_days, slippage_bps, yes, quote, buy_amount, no_stake } =>
+            cmd::buy_and_stake::run(
+                &cli.server,
+                cmd::buy_and_stake::BuyAndStakeArgs {
+                    lock_days,
+                    slippage_bps,
+                    yes,
+                    quote_only: quote,
+                    buy_amount_awp: buy_amount,
+                    no_stake,
+                },
+            ),
         Cmd::Gas => cmd::gas::run(&cli.server),
         Cmd::Status => cmd::status::run(&cli.server),
         Cmd::Context => cmd::context::run(&cli.server),
