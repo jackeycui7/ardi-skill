@@ -16,8 +16,6 @@ trigger_keywords:
   - ardi worknet
   - mine ardinals
   - mint ardinal
-  - 挖铭文
-  - ardi 挖矿
 
 # Bootstrap/smoke entrypoints — every major runtime looks for these
 # at these top-level keys.
@@ -184,7 +182,6 @@ When the user expresses intent like:
 - "mine continuously" / "auto mine" / "I want to be afk"
 - "keep mining for me" / "run forever" / "just go"
 - "set up the cron" / "start the daemon"
-- 中文："自动挖矿" / "循环挖" / "你帮我一直跑"
 
 …install the auto-mine systemd timer. **Do not have the user type any
 shell commands** — call this script directly:
