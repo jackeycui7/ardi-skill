@@ -11,8 +11,18 @@ pub fn run(server_url: &str) -> Result<()> {
     let body: Option<serde_json::Value> = api.try_get_json("/v1/epoch/current")?;
     match body {
         Some(mut epoch) => {
-            let id = epoch.get("epoch_id").and_then(|v| v.as_u64()).unwrap_or(0);
-            let cd = epoch.get("commit_deadline").and_then(|v| v.as_i64()).unwrap_or(0);
+            // coord-rs serializes camelCase via #[serde(rename = "epochId")];
+            // accept both for back-compat with mock payloads.
+            let id = epoch
+                .get("epochId")
+                .or_else(|| epoch.get("epoch_id"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let cd = epoch
+                .get("commitDeadline")
+                .or_else(|| epoch.get("commit_deadline"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
             let now = chrono::Utc::now().timestamp();
             let secs_left = cd - now;
             let mut message = format!(

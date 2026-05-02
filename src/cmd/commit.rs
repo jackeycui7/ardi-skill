@@ -73,7 +73,14 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
         .print();
         return Ok(());
     };
-    let cur_epoch_id = cur.get("epoch_id").and_then(|v| v.as_u64()).unwrap_or(0);
+    // coord-rs serializes via #[serde(rename = "epochId")] — accept both
+    // the camelCase wire name AND the snake_case original (legacy / mock
+    // payloads) so a downstream rename never silently breaks commit.
+    let cur_epoch_id = cur
+        .get("epochId")
+        .or_else(|| cur.get("epoch_id"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let epoch_id = args.epoch_id.unwrap_or(cur_epoch_id);
     if epoch_id != cur_epoch_id {
         Output::error(
@@ -103,14 +110,12 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let Some(riddle) = riddles
-        .iter()
-        .find(|r| r.get("word_id").and_then(|v| v.as_u64()) == Some(args.word_id))
-    else {
-        let available: Vec<u64> = riddles
-            .iter()
-            .filter_map(|r| r.get("word_id").and_then(|v| v.as_u64()))
-            .collect();
+    // Same camelCase concern as cur_epoch_id above.
+    let read_wid = |r: &serde_json::Value| -> Option<u64> {
+        r.get("wordId").or_else(|| r.get("word_id")).and_then(|v| v.as_u64())
+    };
+    let Some(riddle) = riddles.iter().find(|r| read_wid(r) == Some(args.word_id)) else {
+        let available: Vec<u64> = riddles.iter().filter_map(read_wid).collect();
         Output::error_with_debug(
             format!(
                 "wordId {} is not in epoch {epoch_id}'s published riddles.",
@@ -137,7 +142,8 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
         .unwrap_or("en")
         .to_string();
     let language_id = riddle
-        .get("language_id")
+        .get("languageId")
+        .or_else(|| riddle.get("language_id"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u8;
     let power = riddle
@@ -147,7 +153,11 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
 
     // Commit window guard — reject early instead of paying gas for a tx
     // that will revert CommitWindowClosed.
-    let commit_dl = cur.get("commit_deadline").and_then(|v| v.as_i64()).unwrap_or(0);
+    let commit_dl = cur
+        .get("commitDeadline")
+        .or_else(|| cur.get("commit_deadline"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let now = chrono::Utc::now().timestamp();
     if now >= commit_dl {
         Output::error(
