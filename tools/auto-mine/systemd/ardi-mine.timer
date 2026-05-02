@@ -1,0 +1,26 @@
+[Unit]
+Description=Ardi mining tick — every 90s
+Documentation=https://github.com/jackeycui7/ardi-skill/tree/main/tools/auto-mine
+
+[Timer]
+# First fire 30s after boot so the system has time to reach network-online.
+OnBootSec=30s
+
+# Recurring cadence: every 90s.
+# Why 90s and not 6 min (one tick per epoch)?
+#   - commit window is 180s. With 90s ticks, every epoch gets ≥2 commit
+#     attempts — covers transient RPC failures.
+#   - reveal window is 180s. Same logic.
+#   - Cheap precheck in ardi-tick.sh skips no-op ticks for free, so the
+#     LLM agent only spawns when there's actually work.
+OnUnitActiveSec=90s
+
+# If the system was off when a tick should have fired, run once on
+# wake — don't try to "catch up" all missed ticks.
+Persistent=false
+
+# Service this timer fires.
+Unit=ardi-mine.service
+
+[Install]
+WantedBy=timers.target

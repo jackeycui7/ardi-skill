@@ -1,0 +1,39 @@
+[Unit]
+Description=Ardi WorkNet — autonomous mining tick
+Documentation=https://github.com/jackeycui7/ardi-skill/tree/main/tools/auto-mine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# %h = $HOME of the user running the service.
+# Override AUTO_MINE_DIR via systemctl edit if you installed elsewhere.
+Environment=AUTO_MINE_DIR=%h/ardi-skill/tools/auto-mine
+
+# Pull config (private key path, runtime choice, max-per-epoch, LLM key).
+# REQUIRED — service refuses to start without this file.
+EnvironmentFile=%h/.ardi-agent/auto-mine.env
+
+ExecStart=/bin/bash -c '"${AUTO_MINE_DIR}/ardi-tick.sh"'
+
+# Hard kill if a tick wedges past 4 minutes (commit/reveal windows are
+# 3 minutes each — anything longer is stuck).
+TimeoutStartSec=240
+RuntimeMaxSec=240
+
+# If the tick exits non-zero (e.g. RPC down), don't stay in failed state
+# — the next timer tick will retry naturally.
+SuccessExitStatus=0 64 65 66
+
+# Resource caps so a stuck LLM CLI doesn't OOM the box.
+MemoryMax=2G
+CPUQuota=200%
+
+# Logging via journald (default). Tail with: journalctl -u ardi-mine -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+# This service is fired by the timer, not boot — but include here so
+# `systemctl enable ardi-mine.service` works for one-shot manual runs.
+WantedBy=multi-user.target
