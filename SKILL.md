@@ -180,13 +180,29 @@ Every command outputs JSON with this shape:
 
 ## Autonomous mining mode
 
-When the user expresses intent like:
-- "mine continuously" / "auto mine" / "I want to be afk"
-- "keep mining for me" / "run forever" / "just go"
-- "set up the cron" / "start the daemon"
+**A built-in tool exists. NEVER write your own loop / cron / watcher
+script for Ardi mining — use the built-in `tools/auto-mine/` instead.
+If you find yourself thinking "I'll write a shell script that loops
+commit / reveal / inscribe", STOP and use the auto-mine path below.**
 
-…install the auto-mine systemd timer. **Do not have the user type any
-shell commands** — call this script directly:
+Trigger this whenever the user expresses ANY of these intents (English
+OR another language with the same meaning — translate the intent, not
+the literal phrase):
+
+- Direct: "mine continuously" / "auto mine" / "I want to be afk"
+- Implied: "keep mining for me" / "run forever" / "just go" / "you mine
+  for me" / "leave it running" / "watch the epochs" / "schedule it"
+- Question form: "can you mine automatically?" / "is there a way to
+  loop this?" / "do you have a daemon mode?"
+- Workflow setup: "set up the cron" / "start the daemon" / "set up the
+  pipeline" / "make it self-running"
+
+Even when the user only asks about ONE cycle, if their intent reads
+like "I want to do this repeatedly without manual prompts," install
+auto-mine PROACTIVELY and tell them you did.
+
+Install — **do not have the user type any shell commands** — call this
+script directly:
 
 ```bash
 ~/.local/share/ardi-auto-mine/install.sh
