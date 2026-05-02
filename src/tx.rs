@@ -67,13 +67,14 @@ pub fn build_tx(
     }))
 }
 
-/// Build commit calldata. v3: takes staker. Pass Address::ZERO for self-stake.
-pub fn calldata_commit(epoch_id: u64, word_id: u64, hash: B256, staker: Address) -> Vec<u8> {
+/// Build commit calldata. v3.1: takes a staker LIST. Empty → self-stake fallback.
+/// MUST be strict-ascending (= dedup). Skill sorts before calling.
+pub fn calldata_commit(epoch_id: u64, word_id: u64, hash: B256, stakers: Vec<Address>) -> Vec<u8> {
     let call = ArdiEpochDraw::commitCall {
         epochId: U256::from(epoch_id),
         wordId: U256::from(word_id),
         hash,
-        staker,
+        stakers,
     };
     call.abi_encode()
 }

@@ -40,13 +40,18 @@ sol! {
             uint8 element,
             bool published
         );
-        // v3: commit takes staker. address(0) → msg.sender (self-stake).
+        // v3.1: commit takes a staker LIST (max 8, strict ascending = dedup).
+        // Empty array → self-stake fallback (msg.sender as the only staker).
         function commit(
             uint256 epochId,
             uint256 wordId,
             bytes32 hash,
-            address staker
+            address[] stakers
         ) external payable;
+        function getCommitStakers(uint256 epochId, uint256 wordId, address agent)
+            external view returns (address[] memory);
+        function liveStakeForCommit(uint256 epochId, uint256 wordId, address agent)
+            external view returns (uint256);
         // v3 reveal — only (guess, nonce). vaultProof goes to publishAnswers, not reveal.
         function reveal(
             uint256 epochId,

@@ -76,10 +76,10 @@ enum Cmd {
         word_id: u64,
         #[arg(long)]
         answer: String,
-        /// v3: explicit staker for AWP eligibility. Defaults to auto-detect
-        /// via the server (KYA-delegated agents) and falls back to self-stake.
-        #[arg(long)]
-        staker: Option<String>,
+        /// v3.1: explicit staker addresses for AWP eligibility (repeatable,
+        /// max 8). When omitted, the skill auto-detects via AWP RPC.
+        #[arg(long = "staker", num_args = 0..)]
+        staker: Vec<String>,
     },
     /// List local pending commits and the next action for each.
     Commits,
@@ -159,21 +159,26 @@ fn main() {
         Cmd::Status => cmd::status::run(&cli.server),
         Cmd::Context => cmd::context::run(&cli.server),
         Cmd::Commit { epoch, word_id, answer, staker } => {
-            let staker = match staker {
-                Some(s) => match alloy_primitives::Address::parse_checksummed(&s, None)
-                    .or_else(|_| s.parse::<alloy_primitives::Address>())
-                {
-                    Ok(a) => Some(a),
-                    Err(_) => {
-                        log_error!("--staker is not a valid 0x-address: {s}");
-                        std::process::exit(2);
+            let stakers = if staker.is_empty() {
+                None
+            } else {
+                let mut v = Vec::with_capacity(staker.len());
+                for s in &staker {
+                    match alloy_primitives::Address::parse_checksummed(s, None)
+                        .or_else(|_| s.parse::<alloy_primitives::Address>())
+                    {
+                        Ok(a) => v.push(a),
+                        Err(_) => {
+                            log_error!("--staker is not a valid 0x-address: {s}");
+                            std::process::exit(2);
+                        }
                     }
-                },
-                None => None,
+                }
+                Some(v)
             };
             cmd::commit::run(
                 &cli.server,
-                cmd::commit::CommitArgs { epoch_id: epoch, word_id, answer, staker },
+                cmd::commit::CommitArgs { epoch_id: epoch, word_id, answer, stakers },
             )
         }
         Cmd::Commits => cmd::commits::run(&cli.server),

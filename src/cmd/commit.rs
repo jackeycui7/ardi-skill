@@ -26,10 +26,10 @@ pub struct CommitArgs {
     pub epoch_id: Option<u64>, // if None, use current
     pub word_id: u64,
     pub answer: String,
-    /// v3: explicit staker override. If None, auto-detect via the server's
-    /// `/v1/agent/{addr}/stakers` index. If still none, falls back to
-    /// `Address::ZERO`, which the contract interprets as msg.sender (self-stake).
-    pub staker: Option<Address>,
+    /// v3.1: explicit staker list override. If None, auto-detect via AWP RPC.
+    /// Must be unique (skill sorts strict-ascending before sending). If empty
+    /// after auto-detect, hard-error so user knows to stake or fix indexer.
+    pub stakers: Option<Vec<Address>>,
 }
 
 pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
@@ -236,38 +236,43 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
         hex::encode(hash)
     );
 
-    // v3: resolve staker. Explicit > auto-detected via server. If neither
-    // resolves we DO NOT silently fall back to self-stake (H-7): a
-    // KYA-delegated agent doing that would burn gas on a reverting commit.
-    // Force the user to either pass --staker or run `ardi-agent stake` to
-    // see what the chain actually shows.
-    let staker = match args.staker {
-        Some(s) => s,
-        None => match resolve_staker(&api, &agent_str)? {
-            Some(s) => s,
-            None => {
-                Output::error(
-                    format!(
-                        "No staker resolved for {agent_str}. Either you're not staked yet, \
-                         or the coordinator's staker index is behind. Run `ardi-agent stake` \
-                         to see live chain state, then re-run with `--staker 0x...` if needed."
-                    ),
-                    "STAKER_NOT_RESOLVED",
-                    "stake",
-                    true,
-                    "Run `ardi-agent stake` and retry with --staker.",
-                    Internal {
-                        next_action: "check_stake".into(),
-                        next_command: Some("ardi-agent stake".into()),
-                        ..Default::default()
-                    },
-                )
-                .print();
-                return Ok(());
-            }
-        },
+    // v3.1: resolve staker LIST. Explicit > auto-detected via AWP RPC. If
+    // neither resolves we DO NOT silently fall back — H-7 fix.
+    let mut stakers = match args.stakers {
+        Some(s) if !s.is_empty() => s,
+        _ => resolve_stakers(&api, &agent_str)?,
     };
-    log_info!("commit: using staker 0x{:x}", staker);
+    if stakers.is_empty() {
+        Output::error(
+            format!(
+                "No stakers resolved for {agent_str}. Either you're not staked yet, \
+                 or AWP RPC is behind. Run `ardi-agent stake` to see live chain state, \
+                 then re-run with `--staker 0x... [--staker 0x...]` if you know them."
+            ),
+            "STAKER_NOT_RESOLVED",
+            "stake",
+            true,
+            "Run `ardi-agent stake` and retry with --staker.",
+            Internal {
+                next_action: "check_stake".into(),
+                next_command: Some("ardi-agent stake".into()),
+                ..Default::default()
+            },
+        )
+        .print();
+        return Ok(());
+    }
+    // Contract requires strict ascending. Sort + dedup before sending.
+    stakers.sort();
+    stakers.dedup();
+    if stakers.len() > 8 {
+        stakers.truncate(8); // contract MAX_STAKERS_PER_COMMIT
+    }
+    log_info!(
+        "commit: using {} staker(s): {}",
+        stakers.len(),
+        stakers.iter().map(|a| format!("0x{:x}", a)).collect::<Vec<_>>().join(",")
+    );
 
     // Build calldata + tx.
     let to = Address::from_str(
@@ -275,7 +280,7 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("server didn't return epoch_draw_contract"))?,
     )?;
-    let data = tx::calldata_commit(epoch_id, args.word_id, hash, staker);
+    let data = tx::calldata_commit(epoch_id, args.word_id, hash, stakers.clone());
     let tx_obj = tx::build_tx(&agent, &to, data, tx::COMMIT_BOND_WEI, 200_000)?;
 
     let tx_hash = tx::send_and_wait(&tx_obj).context("send commit tx")?;
@@ -342,54 +347,35 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
     Ok(())
 }
 
-/// v3: ask AWP rootnet RPC which staker(s) back this agent. AWP runs the
-/// canonical cross-chain Allocated indexer; we used to mirror it locally on
-/// coord-rs but switched 2026-05-02 to query api.awp.sh/v2 directly so we
-/// don't have to maintain a duplicate indexer.
+/// v3.1: ask AWP rootnet RPC for ALL stakers backing this agent. The
+/// contract sums their allocations across BOTH worknets and accepts iff
+/// total >= minStake. Returns the union of (KYA worknet stakers) +
+/// (Ardi worknet stakers), filtered to non-zero allocations.
 ///
-/// Strategy:
-///   * KYA worknet first — `staking.getAllocationsByAgentSubnet` returns rows
-///     ordered by amount desc. Take the highest with amount >= 10K AWP.
-///   * If no KYA allocation, check Ardi worknet for self-stake (staker == agent).
-///   * Returns Ok(None) when neither path resolves; caller hard-errors.
-///
-/// Source of truth is still on chain (`AWPAllocator.getAgentStake` at commit
-/// _requireEligible) — this RPC is only for *discovery*, so a stale or down
-/// AWP API just means the commit reverts cleanly.
-fn resolve_staker(_api: &ApiClient, agent_addr: &str) -> Result<Option<Address>> {
-    const MIN_STAKE_AWP: u128 = 10_000;
-    const ONE_AWP_WEI: u128 = 1_000_000_000_000_000_000;
-    const MIN_STAKE_WEI: u128 = MIN_STAKE_AWP * ONE_AWP_WEI;
+/// Returns empty Vec if no allocations found anywhere; caller hard-errors.
+/// Source of truth is on chain (`AWPAllocator.getAgentStake` at commit) —
+/// stale RPC just means commit reverts.
+fn resolve_stakers(_api: &ApiClient, agent_addr: &str) -> Result<Vec<Address>> {
     // Verified against AWP subnets.get on 2026-05-02:
-    //   845300000014 = ARDI Worknet (self-stake)
-    //   845300000012 = KYA  Worknet (delegated stakes always land here)
+    //   845300000014 = ARDI Worknet (self-stake lives here)
+    //   845300000012 = KYA  Worknet (delegated stakes land here)
     const ARDI_WN: &str = "845300000014";
     const KYA_WN: &str = "845300000012";
 
     let rpc = crate::awp_rpc::AwpRpc::new()?;
-    let agent_lower = agent_addr.to_lowercase();
 
-    // KYA delegated path — by design, all sponsored stakes go to KYA worknet.
-    if let Ok(rows) = rpc.allocations_by_agent_worknet(agent_addr, KYA_WN, None) {
-        for row in &rows {
-            let amount = U256::from_str_radix(&row.amount, 10).unwrap_or(U256::ZERO);
-            if amount < U256::from(MIN_STAKE_WEI) { continue; }
-            let Ok(staker) = Address::from_str(&row.user_address) else { continue };
-            return Ok(Some(staker)); // first row is highest by API contract
-        }
-    }
-
-    // Self-stake — agent staked their own veAWP allocation on Ardi worknet.
-    if let Ok(rows) = rpc.allocations_by_agent_worknet(agent_addr, ARDI_WN, None) {
-        for row in &rows {
-            let amount = U256::from_str_radix(&row.amount, 10).unwrap_or(U256::ZERO);
-            if amount < U256::from(MIN_STAKE_WEI) { continue; }
-            // Strict self-stake: staker == agent.
-            if row.user_address.to_lowercase() == agent_lower {
-                return Ok(Some(Address::from_str(&row.user_address)?));
+    use std::collections::BTreeSet;
+    let mut set: BTreeSet<Address> = BTreeSet::new();
+    for wn in [KYA_WN, ARDI_WN] {
+        if let Ok(rows) = rpc.allocations_by_agent_worknet(agent_addr, wn, None) {
+            for row in rows {
+                let amount = U256::from_str_radix(&row.amount, 10).unwrap_or(U256::ZERO);
+                if amount == U256::ZERO { continue; }
+                if let Ok(addr) = Address::from_str(&row.user_address) {
+                    set.insert(addr);
+                }
             }
         }
     }
-
-    Ok(None)
+    Ok(set.into_iter().collect()) // BTreeSet → ascending Vec, naturally sorted+deduped
 }
