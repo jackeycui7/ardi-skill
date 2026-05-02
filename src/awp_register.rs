@@ -44,13 +44,18 @@ pub fn ensure_registered(address: &str) -> Result<RegistrationResult> {
     let client = build_client();
 
     // Get registry contract address + nonce.
-    let registry: Value = awp_jsonrpc(&client, "registry.get", json!({ "chainId": CHAIN_ID }))?
-        .get("result")
-        .cloned()
-        .ok_or_else(|| anyhow!("registry.get returned no result"))?;
-    let registry_addr = registry
-        .as_str()
-        .ok_or_else(|| anyhow!("registry.get returned non-string"))?;
+    //
+    // v2 API note: `registry.get` returns a *structured object*
+    // ({chainId, awpRegistry, awpToken, awpAllocator, ...}), NOT a bare
+    // address string. Same for `nonce.get` which returns ({nonce: N}),
+    // not a bare integer. Earlier versions of this code assumed the
+    // primitive form and silently failed at preflight when the API was
+    // upgraded — surfaced in the field by external testers (kaito).
+    let registry_resp: Value = awp_jsonrpc(&client, "registry.get", json!({ "chainId": CHAIN_ID }))?;
+    let registry_addr = registry_resp
+        .pointer("/result/awpRegistry")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("registry.get: missing result.awpRegistry; got {registry_resp}"))?;
 
     let nonce_resp: Value = awp_jsonrpc(
         &client,
@@ -58,9 +63,9 @@ pub fn ensure_registered(address: &str) -> Result<RegistrationResult> {
         json!({ "address": address, "chainId": CHAIN_ID }),
     )?;
     let nonce = nonce_resp
-        .get("result")
+        .pointer("/result/nonce")
         .and_then(|v| v.as_u64())
-        .ok_or_else(|| anyhow!("nonce.get returned non-int"))?;
+        .ok_or_else(|| anyhow!("nonce.get: missing result.nonce; got {nonce_resp}"))?;
 
     let deadline = chrono::Utc::now().timestamp() as u64 + 600;
 
