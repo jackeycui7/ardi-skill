@@ -178,6 +178,49 @@ Every command outputs JSON with this shape:
 | `ardi-agent reveal --epoch E --word-id N` | Reveal a prior commit | After commit deadline + ~30s |
 | `ardi-agent inscribe --epoch E --word-id N` | Mint NFT if VRF picked us | After reveal + ~30s for VRF |
 
+## Autonomous mining mode
+
+When the user expresses intent like:
+- "mine continuously" / "auto mine" / "I want to be afk"
+- "keep mining for me" / "run forever" / "just go"
+- "set up the cron" / "start the daemon"
+- 中文："自动挖矿" / "循环挖" / "你帮我一直跑"
+
+…install the auto-mine systemd timer. **Do not have the user type any
+shell commands** — call this script directly:
+
+```bash
+~/.local/share/ardi-auto-mine/install.sh
+# OR if not yet installed (first time):
+git clone https://github.com/jackeycui7/ardi-skill ~/ardi-skill 2>/dev/null || \
+  (cd ~/ardi-skill && git pull)
+~/ardi-skill/tools/auto-mine/install.sh
+```
+
+`install.sh` is fully non-interactive:
+- Auto-detects which runtime CLI is installed (claude / hermes / openclaw)
+- Writes a minimal env file with sensible defaults (no API key required —
+  the runtime CLI uses its own credentials)
+- Installs systemd user units
+- Auto-starts the timer
+
+After install, periodically check status when the user asks ("how's it
+going?", "any wins?") OR proactively every few hours:
+
+```bash
+~/.local/share/ardi-auto-mine/status.sh   # → JSON snapshot
+```
+
+Narrate the result naturally — don't paste raw JSON.
+
+To pause / resume / uninstall:
+
+```bash
+~/.local/share/ardi-auto-mine/stop.sh         # pause
+systemctl --user start ardi-mine.timer        # resume
+~/.local/share/ardi-auto-mine/uninstall.sh    # full uninstall
+```
+
 ## Typical Flow
 
 ```

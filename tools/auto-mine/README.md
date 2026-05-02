@@ -15,25 +15,36 @@ Install once, mine forever. Works with Claude Code, Hermes, or OpenClaw.
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-## Two install paths
+## How users turn this on
 
-### Path A — systemd timer (recommended; ~90s cadence)
+**They don't.** The user just tells their agent (claude / hermes /
+openclaw) something like "mine continuously" or "set up auto-mine for
+me". The agent — guided by [ardi-skill-rs/SKILL.md](../../SKILL.md)'s
+"Autonomous mining mode" section — runs `install.sh` itself. No shell
+typing, no env file editing, no API key prompt.
 
-Works with Claude Code, Hermes, or OpenClaw-scripted.
+If a human really wants to run it manually:
 
 ```bash
 git clone https://github.com/jackeycui7/ardi-skill.git
-cd ardi-skill/tools/auto-mine
-./install.sh
-nano ~/.ardi-agent/auto-mine.env   # set ANTHROPIC_API_KEY etc
-systemctl --user start ardi-mine.timer
+~/ardi-skill/tools/auto-mine/install.sh    # idempotent + auto-starts
 ```
 
 Verify:
 ```bash
 journalctl --user -u ardi-mine -f
-ardi-agent commits      # should show recent activity
+~/.local/share/ardi-auto-mine/status.sh    # JSON snapshot
 ```
+
+### Why no API key in the env file
+
+The systemd-spawned subagent runs the same `claude` / `hermes` /
+`openclaw` binary the user has been using interactively. That binary
+already has its own credentials (`~/.claude/`, `~/.hermes/`, etc.).
+The subagent inherits the user's identity — no separate auth needed.
+
+If the user has never authed their runtime CLI, install.sh will still
+succeed but ticks will fail until the CLI is authed once (interactively).
 
 ### Path B — OpenClaw heartbeat (no extra install; ~30 min cadence)
 
