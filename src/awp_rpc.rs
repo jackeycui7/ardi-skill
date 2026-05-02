@@ -11,7 +11,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use reqwest::blocking::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -22,11 +22,39 @@ pub struct AwpRpc {
     http: Client,
 }
 
+/// Deserialize an `amount` field that the AWP API serializes as a JSON
+/// number on the wire (e.g. `10000000000000000000000`) — too large for an
+/// i64/u64, would overflow JS Number precision, but serde happily decodes
+/// it as a string for us. Falls back to accepting an actual JSON string
+/// so older AWP versions / mock data still parse.
+///
+/// Without this fix, serde failed silently on the number form and the
+/// caller `if let Ok(rows) = …` swallowed the error → skill discovered
+/// zero stakers → reported 0 stake even when KYA had clearly delegated.
+fn deser_amount_any<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<String, D::Error> {
+    // Requires `arbitrary_precision` on serde_json so Number::to_string()
+    // preserves the raw integer text instead of round-tripping through f64
+    // (which loses precision above ~2^53). For 1e22-scale wei amounts this
+    // matters: without arbitrary_precision, "10000000000000000000000"
+    // becomes "1e+22" — silently un-parseable as U256 downstream.
+    let v = serde_json::Value::deserialize(d)?;
+    match v {
+        serde_json::Value::String(s) => Ok(s),
+        serde_json::Value::Number(n) => Ok(n.to_string()),
+        other => Err(serde::de::Error::custom(format!(
+            "amount: expected string or number, got {other:?}"
+        ))),
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AllocationRow {
     pub chain_id: i64,
     pub user_address: String, // = the staker
-    pub amount: String,       // wei, decimal string
+    /// AWP API returns this as a JSON number (raw uint), not a string.
+    /// Stored here as decimal string for downstream U256 parsing.
+    #[serde(deserialize_with = "deser_amount_any")]
+    pub amount: String,
     pub frozen: bool,
 }
 
@@ -89,5 +117,42 @@ impl AwpRpc {
         let rows: Vec<AllocationRow> = serde_json::from_value(v)
             .context("decode allocation rows")?;
         Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: AWP rootnet RPC returns `amount` as a JSON number (the raw
+    /// uint256 wei). Previous code declared it as `String` only and silently
+    /// failed to decode the number form — causing skill `stake` to report 0
+    /// even when KYA had clearly delegated. Caught only when an external user
+    /// raised "agent says 0 but KYA says 10000 AWP". Pin both forms.
+    #[test]
+    fn allocation_row_decodes_number_amount() {
+        let json_num = r#"{
+            "chain_id": 8453,
+            "user_address": "0x800d05fd8e251c288e22809b79d31f22ab088555",
+            "amount": 10000000000000000000000,
+            "frozen": false
+        }"#;
+        let row: AllocationRow = serde_json::from_str(json_num).unwrap();
+        assert_eq!(row.amount, "10000000000000000000000");
+        assert_eq!(row.user_address, "0x800d05fd8e251c288e22809b79d31f22ab088555");
+        assert_eq!(row.chain_id, 8453);
+        assert!(!row.frozen);
+    }
+
+    #[test]
+    fn allocation_row_still_decodes_string_amount() {
+        let json_str = r#"{
+            "chain_id": 8453,
+            "user_address": "0xabc",
+            "amount": "10000000000000000000000",
+            "frozen": false
+        }"#;
+        let row: AllocationRow = serde_json::from_str(json_str).unwrap();
+        assert_eq!(row.amount, "10000000000000000000000");
     }
 }
