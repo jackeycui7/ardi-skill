@@ -168,6 +168,37 @@ Every command outputs JSON with this shape:
 | `ardi-agent gas` | Check Base ETH balance + refill amount | When preflight reports `INSUFFICIENT_GAS` |
 | `ardi-agent status` | Combined view of everything | Anytime user asks "what's going on" |
 
+### **Critical: commits MUST be serial, never parallel**
+
+`ardi-agent commit` is a one-shot process that fetches its tx nonce
+fresh from the chain. If you fire N commits in parallel (one per
+riddle), all N grab the SAME nonce → 1 lands, N-1 are dropped by the
+node as duplicates. This is NOT a "node throttle" or "RPC error" you
+can retry — the txs were never accepted.
+
+Correct pattern:
+
+```bash
+# WRONG — parallel, will lose ~14 of 15
+ardi-agent commit --word-id A --answer X &
+ardi-agent commit --word-id B --answer Y &
+wait
+
+# RIGHT — serial, all 15 land
+ardi-agent commit --word-id A --answer X
+ardi-agent commit --word-id B --answer Y
+ardi-agent commit --word-id C --answer Z
+...
+```
+
+If you have many commits to send, **await each** before launching the
+next. A typical commit takes ~3-5s including receipt wait, so 5
+commits ≈ 15-25s — well within the 180s commit window.
+
+For unattended bulk mining, do NOT loop manually — install the
+`tools/auto-mine/` systemd timer (see "Autonomous mining mode" below).
+That tool already handles serial nonce management and retry-on-revert.
+
 ### Mining loop commands
 
 | Cmd | Purpose | When to call |

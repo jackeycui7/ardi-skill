@@ -1,6 +1,6 @@
 [package]
 name = "ardi-agent"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2021"
 description = "CLI agent for AWP Ardi WorkNet — solve riddles, mint Ardinal NFTs"
 license = "MIT"
@@ -25,6 +25,7 @@ sha3 = "0.10"
 hex = "0.4"
 rand = "0.8"
 ctrlc = "3"
+libc = "0.2"
 # v0.4.0: dropped alloy-consensus / alloy-signer / alloy-signer-local /
 # alloy-network / alloy-rlp / alloy-dyn-abi. All signing now goes through
 # `awp-wallet send-tx` and `awp-wallet sign-typed-data`; ardi-agent never

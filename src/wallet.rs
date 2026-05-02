@@ -175,6 +175,35 @@ fn require_min_wallet(bin: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// Cross-process file lock that serializes send-tx calls for the same
+/// agent wallet. Without this, two `ardi-agent commit` invocations
+/// fired in parallel would each fetch the same nonce from awp-wallet
+/// (which itself queries the chain fresh every time) → only one tx
+/// lands; the other is dropped by the node as a duplicate.
+///
+/// Reproduced 2026-05-03 when an LLM agent fired 15 commits in
+/// parallel: 1 landed, 14 were silently lost. SKILL.md now tells
+/// the LLM to commit serially, but defense-in-depth: even if it
+/// doesn't, parallel calls block here instead of clashing on chain.
+fn acquire_send_tx_lock() -> Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let path = std::path::Path::new(&dir).join(".ardi-agent").join("send-tx.lock");
+    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+    let f = std::fs::OpenOptions::new()
+        .create(true).read(true).write(true).open(&path)
+        .with_context(|| format!("open send-tx lock {}", path.display()))?;
+    // Blocking exclusive flock — serializes peer processes for the same
+    // user. Cleared automatically when this File drops (process exit
+    // or scope end).
+    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+    if rc != 0 {
+        return Err(anyhow!("flock failed on {}", path.display()));
+    }
+    log_debug!("send-tx: acquired serialization lock {}", path.display());
+    Ok(f)
+}
+
 /// Sign + broadcast an EIP-1559 transaction by delegating to
 /// `awp-wallet send-tx`. Private key never enters this process.
 ///
@@ -186,6 +215,9 @@ fn require_min_wallet(bin: &PathBuf) -> Result<()> {
 pub fn send_tx(tx: &Value) -> Result<String> {
     let bin = awp_wallet_bin()?;
     require_min_wallet(&bin)?;
+    // Serialize parallel send-tx invocations across the user's processes
+    // so they don't all grab the same chain nonce. Held until function exit.
+    let _lock = acquire_send_tx_lock()?;
 
     let to = tx
         .get("to")
