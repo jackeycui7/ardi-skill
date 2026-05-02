@@ -74,20 +74,24 @@ pub fn run(server_url: &str, epoch_id: u64, word_id: u64) -> Result<()> {
 
     // Fetch contract addr (and check reveal window) from current epoch row.
     let ep: serde_json::Value = api.get_json(&format!("/v1/epoch/{epoch_id}"))?;
-    let to = match Address::from_str(
-        ep.get("epoch_draw_contract")
-            .and_then(|v| v.as_str())
-            .or_else(|| ep.get("contract").and_then(|v| v.as_str()))
-            .unwrap_or("0x0"),
-    ) {
+    // /v1/epoch/:id doesn't return contract addresses (snake_case OR
+    // camelCase); we resolve via env var override → /v1/epoch/current
+    // (which DOES return epochDrawContract) → hardcoded mainnet default.
+    let resolved = std::env::var("ARDI_EPOCH_DRAW_ADDR").ok().or_else(|| {
+        api.try_get_json::<serde_json::Value>("/v1/epoch/current")
+            .ok().flatten()
+            .and_then(|c| c.get("epochDrawContract").or_else(|| c.get("epoch_draw_contract"))
+                .and_then(|v| v.as_str()).map(|s| s.to_string()))
+    }).unwrap_or_else(|| "0x21c2ebA56c440c292a32F0Fdd16C26Be13d391Bb".to_string());
+    let to = match Address::from_str(&resolved) {
         Ok(a) => a,
         Err(_) => {
             Output::error(
-                "Server didn't return epoch_draw_contract field for this epoch.",
+                "Could not resolve EpochDraw contract address.",
                 "SERVER_MISSING_CONTRACT_ADDR",
                 "server",
                 false,
-                "This is a server bug — file an issue. As workaround, set ARDI_EPOCH_DRAW_ADDR env to the contract.",
+                "Set ARDI_EPOCH_DRAW_ADDR env to override (mainnet default 0x21c2ebA5...).",
                 Internal { next_action: "blocked".into(), ..Default::default() },
             )
             .print();

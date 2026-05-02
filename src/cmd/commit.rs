@@ -284,11 +284,13 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
         stakers.iter().map(|a| format!("0x{:x}", a)).collect::<Vec<_>>().join(",")
     );
 
-    // Build calldata + tx.
+    // Build calldata + tx. Server returns this field as camelCase
+    // ("epochDrawContract"); accept snake_case for legacy/mock payloads too.
     let to = Address::from_str(
-        cur.get("epoch_draw_contract")
+        cur.get("epochDrawContract")
+            .or_else(|| cur.get("epoch_draw_contract"))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("server didn't return epoch_draw_contract"))?,
+            .ok_or_else(|| anyhow!("server didn't return epochDrawContract / epoch_draw_contract"))?,
     )?;
     let data = tx::calldata_commit(epoch_id, args.word_id, hash, stakers.clone());
     let tx_obj = tx::build_tx(&agent, &to, data, tx::COMMIT_BOND_WEI, 200_000)?;

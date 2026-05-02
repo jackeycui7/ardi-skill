@@ -84,18 +84,25 @@ pub fn run(server_url: &str, epoch_id: u64, word_id: u64) -> Result<()> {
     }
 
     let api = ApiClient::new(server_url)?;
-    let ep: serde_json::Value = api.get_json(&format!("/v1/epoch/{epoch_id}"))?;
-    let draw_addr = Address::from_str(
-        ep.get("epoch_draw_contract")
-            .and_then(|v| v.as_str())
-            .or_else(|| ep.get("contract").and_then(|v| v.as_str()))
-            .unwrap_or("0x0"),
-    )?;
-    let nft_addr = Address::from_str(
-        ep.get("ardi_nft_contract")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("server didn't return ardi_nft_contract"))?,
-    )?;
+    let _ep: serde_json::Value = api.get_json(&format!("/v1/epoch/{epoch_id}"))?;
+    // /v1/epoch/:id doesn't include contract addresses. Resolve via:
+    //   env override → /v1/epoch/current (camelCase) → hardcoded mainnet.
+    let cur_opt = api.try_get_json::<serde_json::Value>("/v1/epoch/current").ok().flatten();
+    let resolve = |env_key: &str, json_key_camel: &str, json_key_snake: &str, fallback: &str| -> String {
+        std::env::var(env_key).ok().or_else(|| {
+            cur_opt.as_ref().and_then(|c| c.get(json_key_camel)
+                .or_else(|| c.get(json_key_snake))
+                .and_then(|v| v.as_str()).map(|s| s.to_string()))
+        }).unwrap_or_else(|| fallback.to_string())
+    };
+    let draw_addr = Address::from_str(&resolve(
+        "ARDI_EPOCH_DRAW_ADDR", "epochDrawContract", "epoch_draw_contract",
+        "0x21c2ebA56c440c292a32F0Fdd16C26Be13d391Bb",
+    ))?;
+    let nft_addr = Address::from_str(&resolve(
+        "ARDI_NFT_ADDR", "ardiNftContract", "ardi_nft_contract",
+        "0x91734696E8164CBF79B666569D2504B0E21218F6",
+    ))?;
 
     // 1. Check on-chain winner.
     let call = ArdiEpochDraw::winnersCall {
