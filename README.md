@@ -8,12 +8,23 @@ via on-chain commit-reveal + Chainlink VRF.
 
 ### 1. Install ardi-agent
 
+**Recommended (auto-detects OS / arch / GLIBC):**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jackeycui7/ardi-skill/main/install.sh | sh
 ```
 
 This drops the `ardi-agent` binary in `~/.local/bin` (or `/usr/local/bin`
-if writable). Add `~/.local/bin` to PATH if not already.
+if writable). Add `~/.local/bin` to PATH if not already. On Linux x86_64
+the installer pulls the **statically-linked musl build** — runs on any
+distro from Alpine to Ubuntu 16.04 with no GLIBC concerns.
+
+**Manual download** (only if you can't run install.sh): pick the right
+binary from [the releases page](https://github.com/jackeycui7/ardi-skill/releases/latest).
+Linux users: prefer `ardi-agent-linux-x86_64-musl` (static, GLIBC-free).
+The plain `ardi-agent-linux-x86_64` build needs GLIBC ≥ 2.35 (Ubuntu
+22.04 / Debian 12 / RHEL 9+); on older hosts it will fail with
+`version 'GLIBC_2.XX' not found`.
 
 ### 2. Install awp-wallet (separate skill)
 
