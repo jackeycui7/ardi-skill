@@ -69,6 +69,12 @@ pub fn ensure_registered(address: &str) -> Result<RegistrationResult> {
 
     let deadline = chrono::Utc::now().timestamp() as u64 + 600;
 
+    // v2 contract uses `user` (not `agent`) in the EIP-712 SetRecipient
+    // schema. v0.3.4 only renamed the relay POST field — the typed-data
+    // schema kept `agent`, which made the hash diverge from what the
+    // contract verifier computes → setRecipientFor() reverts InvalidSignature
+    // (selector 0x8baa579f). Production tx confirmed:
+    // 0x5b9287c567cae98d0f4a2833bae9d3467f3e116629f1996962b4d3749b6f5023.
     let typed = json!({
         "domain": {
             "name": "AWPRegistry",
@@ -78,7 +84,7 @@ pub fn ensure_registered(address: &str) -> Result<RegistrationResult> {
         },
         "types": {
             "SetRecipient": [
-                { "name": "agent", "type": "address" },
+                { "name": "user", "type": "address" },
                 { "name": "recipient", "type": "address" },
                 { "name": "nonce", "type": "uint256" },
                 { "name": "deadline", "type": "uint256" },
@@ -86,7 +92,7 @@ pub fn ensure_registered(address: &str) -> Result<RegistrationResult> {
         },
         "primaryType": "SetRecipient",
         "message": {
-            "agent": address,
+            "user": address,
             "recipient": address,
             "nonce": nonce.to_string(),
             "deadline": deadline.to_string(),
