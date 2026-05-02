@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use crate::auth::get_address;
-use crate::chain::AWPAllocator;
+use crate::chain::{ArdiEpochDraw, AWPAllocator};
 use crate::output::{Internal, Output};
 use crate::tx;
 
@@ -28,8 +28,26 @@ const ARDI_WORKNET_ID: &str = "845300000014";
 const KYA_WORKNET_ID: &str = "845300000012";
 const VE_AWP: &str = "0x0000b534C63D78212f1BDCc315165852793A00A8";
 const AWP_ALLOCATOR: &str = "0x0000D6BB5e040E35081b3AaF59DD71b21C9800AA";
-const MIN_STAKE_AWP: u128 = 10_000;
+// ArdiEpochDraw v3 proxy on Base mainnet — UUPS upgradable, owner-settable
+// minStake. We read the threshold LIVE from this proxy so the skill always
+// reflects the current contract state instead of a stale constant.
+const EPOCH_DRAW: &str = "0x21c2ebA56c440c292a32F0Fdd16C26Be13d391Bb";
+// Display fallback only — used in error messages and JSON when the on-chain
+// read fails (e.g. RPC down). Mirrors the value at deploy time but the
+// authoritative source is the chain read below.
+const MIN_STAKE_AWP_DEFAULT: u128 = 10_000;
 const ONE_AWP_WEI: u128 = 1_000_000_000_000_000_000;
+
+/// Read the live minStake threshold from the EpochDraw contract on Base
+/// mainnet. Owner-settable, so we MUST query the chain — never assume.
+fn read_min_stake_wei() -> Result<U256> {
+    let addr_str = std::env::var("ARDI_EPOCH_DRAW_ADDR").unwrap_or_else(|_| EPOCH_DRAW.to_string());
+    let addr = Address::from_str(&addr_str)?;
+    let call = ArdiEpochDraw::minStakeCall {};
+    let raw = tx::view_call(&addr, call.abi_encode())?;
+    let decoded = ArdiEpochDraw::minStakeCall::abi_decode_returns(&raw, true)?;
+    Ok(decoded._0)
+}
 
 #[derive(Debug, Clone)]
 struct CheckedAlloc {
@@ -56,7 +74,19 @@ fn read_alloc(staker: Address, agent: Address, worknet_id_str: &str) -> Result<U
 pub fn run(_server_url: &str) -> Result<()> {
     let address_str = get_address()?;
     let agent = Address::from_str(&address_str)?;
-    let min_stake_wei = U256::from(MIN_STAKE_AWP) * U256::from(ONE_AWP_WEI);
+    // v3.1 — read minStake LIVE from EpochDraw. Owner can change it via
+    // setMinStake; hardcoding here would silently lie to the user.
+    let (min_stake_wei, min_stake_source) = match read_min_stake_wei() {
+        Ok(v) => (v, "chain"),
+        Err(e) => {
+            crate::log_warn!("could not read minStake from chain ({e}); using default {MIN_STAKE_AWP_DEFAULT} AWP");
+            (
+                U256::from(MIN_STAKE_AWP_DEFAULT) * U256::from(ONE_AWP_WEI),
+                "fallback-constant",
+            )
+        }
+    };
+    let min_stake_awp = (min_stake_wei.to::<u128>() as f64) / (ONE_AWP_WEI as f64);
 
     // Build the candidate staker set from AWP rootnet RPC. AWP indexes
     // Allocated events across all chains; we ask both worknets and union
@@ -101,7 +131,7 @@ pub fn run(_server_url: &str) -> Result<()> {
 
     let mut lines = vec![
         format!("Agent:                  {address_str}"),
-        format!("Threshold (each path):  {} AWP", MIN_STAKE_AWP),
+        format!("Threshold (each path):  {} AWP (source: {})", min_stake_awp, min_stake_source),
     ];
     if allocs.is_empty() {
         lines.push("No allocations found across known stakers.".into());
@@ -150,7 +180,7 @@ pub fn run(_server_url: &str) -> Result<()> {
                 "chosen_staker": format!("0x{:x}", chosen.staker),
                 "chosen_worknet_id": chosen.worknet,
                 "chosen_stake_awp": chosen.stake_awp,
-                "min_stake_awp": MIN_STAKE_AWP,
+                "min_stake_awp": min_stake_awp,
                 "all_allocations": allocs.iter().map(|a| json!({
                     "staker": format!("0x{:x}", a.staker),
                     "worknet_id": a.worknet,
@@ -176,7 +206,7 @@ pub fn run(_server_url: &str) -> Result<()> {
     lines.push("    https://awp.pro/staking".into());
     lines.push(format!(
         "    Connect your wallet, lock >= {} AWP, allocate to:",
-        MIN_STAKE_AWP
+        min_stake_awp
     ));
     lines.push(format!("      agent: {address_str}"));
     lines.push(format!("      worknetId: {ARDI_WORKNET_ID} (Ardi)"));
@@ -191,7 +221,7 @@ pub fn run(_server_url: &str) -> Result<()> {
     lines.push("    Base mainnet (chainId 8453):".into());
     lines.push(format!(
         "      veAWP.deposit(amount={}e18, lockDuration)",
-        MIN_STAKE_AWP
+        min_stake_awp
     ));
     lines.push(format!("        contract: {VE_AWP}"));
     lines.push(format!(
@@ -199,7 +229,7 @@ pub fn run(_server_url: &str) -> Result<()> {
     ));
     lines.push(format!(
         "                            worknetId=<ARDI or KYA>, amount={}e18)",
-        MIN_STAKE_AWP
+        min_stake_awp
     ));
     lines.push(format!("        contract: {AWP_ALLOCATOR}"));
     lines.push(String::new());
@@ -210,14 +240,14 @@ pub fn run(_server_url: &str) -> Result<()> {
         "NOT_STAKED",
         "stake",
         false,
-        "Reach the 10,000 AWP threshold on EITHER Ardi (845300000014) OR KYA (845300000012) worknet, then re-run.",
+        &format!("Reach the {min_stake_awp} AWP threshold on EITHER Ardi (845300000014) OR KYA (845300000012) worknet, then re-run."),
         json!({
             "address": address_str,
             "eligible": false,
             "via": null,
             "ardi_worknet_id": ARDI_WORKNET_ID,
             "kya_worknet_id":  KYA_WORKNET_ID,
-            "min_stake_awp":   MIN_STAKE_AWP,
+            "min_stake_awp":   min_stake_awp,
             "ve_awp_contract":      VE_AWP,
             "awp_allocator_contract": AWP_ALLOCATOR,
             "all_allocations": allocs.iter().map(|a| json!({

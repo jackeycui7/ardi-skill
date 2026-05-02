@@ -59,6 +59,9 @@ sol! {
         ) external;
         function winners(uint256 epochId, uint256 wordId) external view returns (address);
         function agentWinCount(address agent) external view returns (uint8);
+        // Live threshold (commit reverts if agent's summed stake < this).
+        // Owner-settable via setMinStake; skill MUST read live, not hardcode.
+        function minStake() external view returns (uint256);
     }
 }
 
