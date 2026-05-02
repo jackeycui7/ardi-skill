@@ -162,7 +162,8 @@ Every command outputs JSON with this shape:
 | Cmd | Purpose | When to call |
 |---|---|---|
 | `ardi-agent preflight` | 5-step env check (wallet, AWP reg, coord, gas, stake) | First action of any session |
-| `ardi-agent stake` | Show 3-path stake guidance (web UI / KYA / contracts) | When preflight reports `NOT_STAKED` |
+| `ardi-agent stake` | Show 3-path stake guidance (KYA / buy-and-stake / manual) | When preflight reports `NOT_STAKED` |
+| `ardi-agent buy-and-stake` | One command: ETH → AWP swap → lock → allocate. **Recommended for users with ETH** (≈ 0.01 ETH covers stake + many cycles of gas). Auto-detects shortfall and only buys what's missing. Flags: `--lock-days N` (default 3), `--slippage BPS` (default 300 = 3%), `-y` (skip confirm). | When user has ETH but no AWP and wants automatic onboarding |
 | `ardi-agent gas` | Check Base ETH balance + refill amount | When preflight reports `INSUFFICIENT_GAS` |
 | `ardi-agent status` | Combined view of everything | Anytime user asks "what's going on" |
 
@@ -222,7 +223,8 @@ systemctl --user start ardi-mine.timer        # resume
 
 ```
 preflight                                          ← env OK?
-  └─ if NOT_STAKED → stake                        ← guide user to stake
+  └─ if NOT_STAKED + has ETH  → buy-and-stake    ← one-command auto-onboard
+  └─ if NOT_STAKED + no ETH   → stake            ← show 3 paths (KYA recommended)
   └─ if INSUFFICIENT_GAS → gas                    ← guide user to fund
 context                                            ← see this round's riddles
   ↓ (you read 15 riddles, pick which to attempt + decide answers)
@@ -250,7 +252,7 @@ to decide what to do:
 | `AWP_NOT_REGISTERED` | Address not yet registered on AWP rootnet | Re-run `preflight` (auto-registers gaslessly) |
 | `COORDINATOR_UNREACHABLE` | Server down or wrong URL | Check `ARDI_COORDINATOR_URL`, retry |
 | `INSUFFICIENT_GAS` | < 0.003 ETH on Base | User must send ETH; tell them the address |
-| `NOT_STAKED` | < 10K AWP allocated to Ardi worknet | Run `stake` for guidance |
+| `NOT_STAKED` | < 10K AWP allocated to Ardi worknet | If user has ETH: `buy-and-stake` (auto). Else: `stake` for the 3-path menu (recommend KYA path for AWP-less users) |
 | `NO_OPEN_EPOCH` | Between commit windows | Wait, run `context` again in 1 min |
 | `WRONG_EPOCH` | --epoch doesn't match current | Use the suggested epoch_id |
 | `WORDID_NOT_IN_EPOCH` | word_id not in this round's 15 | Run `context` to see actual list |
