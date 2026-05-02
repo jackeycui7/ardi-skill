@@ -10,31 +10,29 @@ pub fn run(server_url: &str) -> Result<()> {
     let api = ApiClient::new(server_url)?;
     let body: Option<serde_json::Value> = api.try_get_json("/v1/epoch/current")?;
     match body {
-        Some(mut epoch) => {
-            // coord-rs serializes camelCase via #[serde(rename = "epochId")];
-            // accept both for back-compat with mock payloads.
-            let id = epoch
-                .get("epochId")
-                .or_else(|| epoch.get("epoch_id"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let cd = epoch
-                .get("commitDeadline")
-                .or_else(|| epoch.get("commit_deadline"))
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
+        Some(raw) => {
+            // Parse strict-typed first; fall back to passing the raw JSON
+            // through so the LLM still gets the riddles even if a new
+            // optional field gets added that we don't know about.
+            let parsed: crate::schema::CurrentEpoch =
+                crate::schema::parse("/v1/epoch/current", raw.clone())?;
             let now = chrono::Utc::now().timestamp();
-            let secs_left = cd - now;
+            let secs_left = parsed.commit_deadline - now;
             let mut message = format!(
-                "Epoch {id}: commit window closes in {secs_left}s ({} riddles).",
-                epoch.get("riddles").and_then(|r| r.as_array()).map(|a| a.len()).unwrap_or(0)
+                "Epoch {}: commit window closes in {secs_left}s ({} riddles).",
+                parsed.epoch_id, parsed.riddles.len()
             );
-            // Reminder — without enough gas the agent can't actually commit.
+            // Echo the raw payload so the LLM sees every field including
+            // theme/element + any future additions (it's the agent's
+            // input for solving). We tack a balance_warning onto it.
+            let mut epoch = raw;
             if let Ok(addr) = crate::auth::get_address() {
                 if let Some((warn_payload, warn_msg)) =
                     crate::cmd::gas::low_balance_warning(&addr)
                 {
-                    epoch["balance_warning"] = warn_payload;
+                    if let serde_json::Value::Object(ref mut m) = epoch {
+                        m.insert("balance_warning".into(), warn_payload);
+                    }
                     message = format!("{message}\n\n{warn_msg}");
                 }
             }

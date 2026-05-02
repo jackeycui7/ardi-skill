@@ -14,6 +14,7 @@ mod client;
 mod cmd;
 mod output;
 mod rpc;
+mod schema;
 mod state;
 mod tx;
 mod wallet;

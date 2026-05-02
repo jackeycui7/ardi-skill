@@ -52,20 +52,22 @@ pub fn ensure_registered(address: &str) -> Result<RegistrationResult> {
     // primitive form and silently failed at preflight when the API was
     // upgraded — surfaced in the field by external testers (kaito).
     let registry_resp: Value = awp_jsonrpc(&client, "registry.get", json!({ "chainId": CHAIN_ID }))?;
-    let registry_addr = registry_resp
-        .pointer("/result/awpRegistry")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("registry.get: missing result.awpRegistry; got {registry_resp}"))?;
+    let registry_result = registry_resp.get("result").cloned()
+        .ok_or_else(|| anyhow!("registry.get: missing top-level `result`; got {registry_resp}"))?;
+    let registry: crate::schema::RegistryGetResult =
+        crate::schema::parse("registry.get", registry_result)?;
+    let registry_addr = &registry.awp_registry;
 
     let nonce_resp: Value = awp_jsonrpc(
         &client,
         "nonce.get",
         json!({ "address": address, "chainId": CHAIN_ID }),
     )?;
-    let nonce = nonce_resp
-        .pointer("/result/nonce")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| anyhow!("nonce.get: missing result.nonce; got {nonce_resp}"))?;
+    let nonce_result = nonce_resp.get("result").cloned()
+        .ok_or_else(|| anyhow!("nonce.get: missing top-level `result`; got {nonce_resp}"))?;
+    let nonce_typed: crate::schema::NonceGetResult =
+        crate::schema::parse("nonce.get", nonce_result)?;
+    let nonce = nonce_typed.nonce;
 
     let deadline = chrono::Utc::now().timestamp() as u64 + 600;
 

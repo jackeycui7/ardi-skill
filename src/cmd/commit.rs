@@ -54,10 +54,14 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
     };
     let agent = Address::from_str(&agent_str)?;
 
-    // Resolve epoch_id from current if not given.
+    // Resolve epoch_id from current if not given. Strong-typed deserialize:
+    // any wire-format change (renamed / removed / type-shifted field)
+    // surfaces as a clear `decode /v1/epoch/current: ...` error instead
+    // of silently falling through .unwrap_or(0). See src/schema.rs for
+    // the full spec of every external response shape.
     let api = ApiClient::new(server_url)?;
-    let cur: Option<serde_json::Value> = api.try_get_json("/v1/epoch/current")?;
-    let Some(cur) = cur else {
+    let cur_val: Option<serde_json::Value> = api.try_get_json("/v1/epoch/current")?;
+    let Some(cur_val) = cur_val else {
         Output::error(
             "No commit-able epoch right now (commit window for this cycle has closed; new epoch opens within ~6 min).",
             "NO_OPEN_EPOCH",
@@ -73,29 +77,21 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
         .print();
         return Ok(());
     };
-    // coord-rs serializes via #[serde(rename = "epochId")] — accept both
-    // the camelCase wire name AND the snake_case original (legacy / mock
-    // payloads) so a downstream rename never silently breaks commit.
-    let cur_epoch_id = cur
-        .get("epochId")
-        .or_else(|| cur.get("epoch_id"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let epoch_id = args.epoch_id.unwrap_or(cur_epoch_id);
-    if epoch_id != cur_epoch_id {
+    let cur: crate::schema::CurrentEpoch = crate::schema::parse("/v1/epoch/current", cur_val)?;
+
+    let epoch_id = args.epoch_id.unwrap_or(cur.epoch_id);
+    if epoch_id != cur.epoch_id {
         Output::error(
-            format!(
-                "Epoch {epoch_id} is not the current commit-able epoch (current={cur_epoch_id})."
-            ),
+            format!("Epoch {epoch_id} is not the current commit-able epoch (current={})", cur.epoch_id),
             "WRONG_EPOCH",
             "validation",
             false,
-            format!("Use --epoch {cur_epoch_id} or omit --epoch to use current."),
+            format!("Use --epoch {} or omit --epoch to use current.", cur.epoch_id),
             Internal {
                 next_action: "fix_args".into(),
                 next_command: Some(format!(
-                    "ardi-agent commit --epoch {cur_epoch_id} --word-id {} --answer {}",
-                    args.word_id, args.answer
+                    "ardi-agent commit --epoch {} --word-id {} --answer {}",
+                    cur.epoch_id, args.word_id, args.answer
                 )),
                 ..Default::default()
             },
@@ -105,22 +101,10 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
     }
 
     // Validate the riddle exists in the published list.
-    let riddles = cur
-        .get("riddles")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    // Same camelCase concern as cur_epoch_id above.
-    let read_wid = |r: &serde_json::Value| -> Option<u64> {
-        r.get("wordId").or_else(|| r.get("word_id")).and_then(|v| v.as_u64())
-    };
-    let Some(riddle) = riddles.iter().find(|r| read_wid(r) == Some(args.word_id)) else {
-        let available: Vec<u64> = riddles.iter().filter_map(read_wid).collect();
+    let Some(riddle) = cur.riddles.iter().find(|r| r.word_id == args.word_id) else {
+        let available: Vec<u64> = cur.riddles.iter().map(|r| r.word_id).collect();
         Output::error_with_debug(
-            format!(
-                "wordId {} is not in epoch {epoch_id}'s published riddles.",
-                args.word_id
-            ),
+            format!("wordId {} is not in epoch {epoch_id}'s published riddles.", args.word_id),
             "WORDID_NOT_IN_EPOCH",
             "validation",
             false,
@@ -136,28 +120,13 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
         return Ok(());
     };
 
-    let language = riddle
-        .get("language")
-        .and_then(|v| v.as_str())
-        .unwrap_or("en")
-        .to_string();
-    let language_id = riddle
-        .get("languageId")
-        .or_else(|| riddle.get("language_id"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u8;
-    let power = riddle
-        .get("power")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u16;
+    let language = riddle.language.clone();
+    let language_id = riddle.language_id;
+    let power = riddle.power;
 
     // Commit window guard — reject early instead of paying gas for a tx
     // that will revert CommitWindowClosed.
-    let commit_dl = cur
-        .get("commitDeadline")
-        .or_else(|| cur.get("commit_deadline"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let commit_dl = cur.commit_deadline;
     let now = chrono::Utc::now().timestamp();
     if now >= commit_dl {
         Output::error(
@@ -284,14 +253,7 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
         stakers.iter().map(|a| format!("0x{:x}", a)).collect::<Vec<_>>().join(",")
     );
 
-    // Build calldata + tx. Server returns this field as camelCase
-    // ("epochDrawContract"); accept snake_case for legacy/mock payloads too.
-    let to = Address::from_str(
-        cur.get("epochDrawContract")
-            .or_else(|| cur.get("epoch_draw_contract"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("server didn't return epochDrawContract / epoch_draw_contract"))?,
-    )?;
+    let to = Address::from_str(&cur.epoch_draw_contract)?;
     let data = tx::calldata_commit(epoch_id, args.word_id, hash, stakers.clone());
     let tx_obj = tx::build_tx(&agent, &to, data, tx::COMMIT_BOND_WEI, 200_000)?;
 
@@ -327,7 +289,7 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
         "tx_hash": tx_hash,
         "commit_hash": format!("0x{}", hex::encode(hash)),
         "bond_wei": tx::COMMIT_BOND_WEI.to_string(),
-        "reveal_after": cur.get("commit_deadline"),
+        "reveal_after": cur.commit_deadline,
     });
 
     let mut message = format!(
