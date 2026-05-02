@@ -60,7 +60,8 @@ const ETH_GAS_BUFFER_WEI: u128 = 1_500_000_000_000_000; // 0.0015 ETH for gas he
 pub struct BuyAndStakeArgs {
     pub lock_days: Option<u32>,
     pub slippage_bps: Option<u32>,
-    pub yes: bool,        // skip confirmation prompt
+    pub yes: bool,        // skip confirmation prompt (use defaults)
+    pub quote_only: bool, // dry-quote, no tx, structured JSON for the LLM
 }
 
 pub fn run(_server_url: &str, args: BuyAndStakeArgs) -> Result<()> {
@@ -85,6 +86,29 @@ pub fn run(_server_url: &str, args: BuyAndStakeArgs) -> Result<()> {
         min_stake_wei - awp_balance_wei
     };
     let need_awp = wei_to_awp_f(need_wei);
+
+    // ── 2a. Quote-only mode: structured JSON for the LLM, no tx ─────
+    // The LLM should call this first, relay the plan to the user, get
+    // their lock-days choice + confirmation, then re-invoke with
+    // `--yes --lock-days N` to actually execute. Without this two-step
+    // pattern the LLM has no way to insert a human-in-the-loop on a
+    // non-interactive stdin.
+    if args.quote_only {
+        let quote = quote_only(&agent, need_wei, awp_balance_wei, min_stake_wei, slip_bps)?;
+        Output::success(
+            format!("Quote ready — relay to user, confirm, then re-run with `--yes --lock-days N`"),
+            quote,
+            Internal {
+                next_action: "await_user_confirmation".into(),
+                next_command: Some(format!(
+                    "ardi-agent buy-and-stake --yes --lock-days <USER_CHOICE>"
+                )),
+                ..Default::default()
+            },
+        )
+        .print();
+        return Ok(());
+    }
 
     // ── 2. If we need to buy AWP, run the swap ──────────────────────
     if need_wei > U256::ZERO {
@@ -302,6 +326,67 @@ fn do_stake(agent: &Address, amount_wei: U256, lock_seconds: u64) -> Result<()> 
 // ============================================================================
 // helpers
 // ============================================================================
+
+/// Read-only plan: fills `data` field with everything the LLM needs to
+/// narrate the trade to the user without executing anything.
+fn quote_only(
+    agent: &Address,
+    need_wei: U256,
+    have_wei: U256,
+    threshold_wei: U256,
+    slip_bps: u32,
+) -> Result<serde_json::Value> {
+    let need_awp = wei_to_awp_f(need_wei);
+    let have_awp = wei_to_awp_f(have_wei);
+    let threshold_awp = wei_to_awp_f(threshold_wei);
+
+    let (eth_needed, usdc_min, awp_min, total_with_gas) = if need_wei.is_zero() {
+        (U256::ZERO, U256::ZERO, U256::ZERO, U256::ZERO)
+    } else {
+        let probe_usdc = U256::from(100u128 * ONE_USDC_UNIT);
+        let probe_awp = quote_usdc_to_awp(probe_usdc)?;
+        let usdc_needed = probe_usdc.checked_mul(need_wei).ok_or_else(|| anyhow!("overflow"))?
+            / probe_awp;
+        let usdc_with_buffer = usdc_needed * U256::from(105u32) / U256::from(100u32);
+        let eth_needed = quote_eth_for_usdc_out(usdc_with_buffer)?;
+        let usdc_min = apply_slippage(usdc_needed, slip_bps);
+        let awp_min = apply_slippage(need_wei, slip_bps);
+        let total_with_gas = eth_needed.saturating_add(U256::from(ETH_GAS_BUFFER_WEI));
+        (eth_needed, usdc_min, awp_min, total_with_gas)
+    };
+
+    let eth_bal = U256::from(tx::eth_balance(agent)?);
+    let eth_sufficient = eth_bal >= total_with_gas;
+
+    Ok(json!({
+        "agent_address": format!("0x{:x}", agent),
+        "current_awp": have_awp,
+        "threshold_awp": threshold_awp,
+        "needed_awp": need_awp,
+        "needs_swap": !need_wei.is_zero(),
+        "swap": if need_wei.is_zero() { json!(null) } else { json!({
+            "spend_eth": wei_to_eth_f(eth_needed),
+            "buffer_eth_for_gas": wei_to_eth_f(U256::from(ETH_GAS_BUFFER_WEI)),
+            "total_burn_eth": wei_to_eth_f(total_with_gas),
+            "slippage_bps": slip_bps,
+            "min_usdc_received": (usdc_min.to::<u128>() as f64) / (ONE_USDC_UNIT as f64),
+            "min_awp_received": wei_to_awp_f(awp_min),
+            "route": "ETH → USDC (Uniswap V3 0.05%) → AWP (Aerodrome CL)",
+            "wallet_eth_balance": wei_to_eth_f(eth_bal),
+            "eth_sufficient": eth_sufficient,
+        }) },
+        "stake_options": {
+            "default_lock_days": DEFAULT_LOCK_DAYS,
+            "min_lock_days": 1,
+            "max_lock_days": 1460,
+            "note": "Locked AWP cannot be withdrawn until expiry. Default 3 days keeps you flexible; longer locks are NOT required for Ardi eligibility.",
+        },
+        "next_step": format!(
+            "Confirm with user, then run: ardi-agent buy-and-stake --yes --lock-days <N>{}",
+            if slip_bps != DEFAULT_SLIPPAGE_BPS { format!(" --slippage {slip_bps}") } else { String::new() }
+        ),
+    }))
+}
 
 fn quote_usdc_to_awp(usdc_in: U256) -> Result<U256> {
     let pool = Address::from_str(AERO_USDC_AWP_POOL)?;

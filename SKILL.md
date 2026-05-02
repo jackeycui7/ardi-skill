@@ -163,7 +163,8 @@ Every command outputs JSON with this shape:
 |---|---|---|
 | `ardi-agent preflight` | 5-step env check (wallet, AWP reg, coord, gas, stake) | First action of any session |
 | `ardi-agent stake` | Show 3-path stake guidance (KYA / buy-and-stake / manual) | When preflight reports `NOT_STAKED` |
-| `ardi-agent buy-and-stake` | One command: ETH → AWP swap → lock → allocate. **Recommended for users with ETH** (≈ 0.01 ETH covers stake + many cycles of gas). Auto-detects shortfall and only buys what's missing. Flags: `--lock-days N` (default 3), `--slippage BPS` (default 300 = 3%), `-y` (skip confirm). | When user has ETH but no AWP and wants automatic onboarding |
+| `ardi-agent buy-and-stake --quote` | **CALL THIS FIRST.** Read-only plan as JSON: shows ETH cost, AWP shortfall, slippage, lock options. NO on-chain action. Relay the plan to the user, ask "OK to spend X ETH? Lock for how many days (default 3)?". | When user has ETH but no AWP — STEP 1 of two-step UX |
+| `ardi-agent buy-and-stake --yes --lock-days N` | After user confirms the quote, this actually executes (swap + deposit + allocate). `-y` skips the on-stdin prompt because LLM agents have no interactive stdin; `--lock-days` is required (no default at execute time, you must pass the user's chosen number). Optional `--slippage BPS` if user wants something other than 3%. | STEP 2 — only after user explicitly confirms the quote from STEP 1 |
 | `ardi-agent gas` | Check Base ETH balance + refill amount | When preflight reports `INSUFFICIENT_GAS` |
 | `ardi-agent status` | Combined view of everything | Anytime user asks "what's going on" |
 

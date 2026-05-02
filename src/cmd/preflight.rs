@@ -146,15 +146,17 @@ pub fn run(server_url: &str) -> Result<()> {
         gas_check.balance_eth
     );
 
-    // 5/5 stake
-    log_info!("preflight [5/5]: checking stake eligibility...");
-    let stake_state: Option<serde_json::Value> =
-        api.try_get_json(&format!("/v1/agent/{address}/state"))?;
-    let eligible = stake_state
-        .as_ref()
-        .and_then(|v| v.get("eligible"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    // 5/5 stake — query chain directly (NOT the coord-rs cache).
+    //
+    // Earlier versions read `eligible` from /v1/agent/{addr}/state, but
+    // that endpoint never returned an `eligible` field — only mints /
+    // mintCount / remainingMintCap. The .unwrap_or(false) made preflight
+    // permanently report NOT_STAKED, contradicting `ardi-agent stake`
+    // which read on-chain (correct). Reproduced 2026-05-03 when
+    // buy-and-stake completed 3 chain txs successfully but preflight
+    // still said NOT_STAKED.
+    log_info!("preflight [5/5]: checking stake eligibility (on-chain)...");
+    let eligible = crate::cmd::stake::check_eligible_onchain(&address).unwrap_or(false);
 
     if !eligible {
         Output::error(

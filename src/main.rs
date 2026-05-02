@@ -75,6 +75,12 @@ enum Cmd {
         /// Skip the confirmation prompt (for unattended / scripted use).
         #[arg(long, short = 'y')]
         yes: bool,
+        /// Print the structured plan as JSON and exit — no on-chain action.
+        /// Use this from an LLM agent to relay the plan to the user, get
+        /// their confirmation + lock-days choice, then re-invoke without
+        /// --quote (with --yes --lock-days N) to execute.
+        #[arg(long)]
+        quote: bool,
     },
     /// Show Base ETH balance + refill guidance.
     Gas,
@@ -171,9 +177,14 @@ fn main() {
     let result = match cli.cmd {
         Cmd::Preflight => cmd::preflight::run(&cli.server),
         Cmd::Stake => cmd::stake::run(&cli.server),
-        Cmd::BuyAndStake { lock_days, slippage_bps, yes } => cmd::buy_and_stake::run(
+        Cmd::BuyAndStake { lock_days, slippage_bps, yes, quote } => cmd::buy_and_stake::run(
             &cli.server,
-            cmd::buy_and_stake::BuyAndStakeArgs { lock_days, slippage_bps, yes },
+            cmd::buy_and_stake::BuyAndStakeArgs {
+                lock_days,
+                slippage_bps,
+                yes,
+                quote_only: quote,
+            },
         ),
         Cmd::Gas => cmd::gas::run(&cli.server),
         Cmd::Status => cmd::status::run(&cli.server),

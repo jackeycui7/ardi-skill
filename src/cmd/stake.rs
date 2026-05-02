@@ -38,6 +38,45 @@ const EPOCH_DRAW: &str = "0x21c2ebA56c440c292a32F0Fdd16C26Be13d391Bb";
 const MIN_STAKE_AWP_DEFAULT: u128 = 10_000;
 const ONE_AWP_WEI: u128 = 1_000_000_000_000_000_000;
 
+/// Lightweight on-chain eligibility probe. Returns true when the agent
+/// has summed stake (across both worknets, all known stakers) >= minStake.
+/// Used by `preflight` so it doesn't go through the coord-rs cache.
+///
+/// Trade-off: discovery is bounded — checks self-stake AND any stakers
+/// AWP RPC currently knows about. If a brand-new KYA delegation hasn't
+/// been indexed yet, this could undercount briefly (same as `stake`).
+pub fn check_eligible_onchain(agent_str: &str) -> Result<bool> {
+    let agent = Address::from_str(agent_str)?;
+    let min_stake_wei = read_min_stake_wei().unwrap_or(U256::from(MIN_STAKE_AWP_DEFAULT) * U256::from(ONE_AWP_WEI));
+
+    // Discovery — agent + AWP-RPC-known stakers.
+    let mut stakers: BTreeMap<String, Address> = BTreeMap::new();
+    stakers.insert(format!("0x{:x}", agent), agent);
+    if let Ok(rpc) = crate::awp_rpc::AwpRpc::new() {
+        for wn in [ARDI_WORKNET_ID, KYA_WORKNET_ID] {
+            if let Ok(rows) = rpc.allocations_by_agent_worknet(agent_str, wn, None) {
+                for r in rows {
+                    if let Ok(addr) = Address::from_str(&r.user_address) {
+                        stakers.insert(format!("0x{:x}", addr), addr);
+                    }
+                }
+            }
+        }
+    }
+
+    // Probe each (staker, worknet) pair on-chain. First one passing is enough.
+    for (_, &staker) in &stakers {
+        for wn in [ARDI_WORKNET_ID, KYA_WORKNET_ID] {
+            if let Ok(stake_wei) = read_alloc(staker, agent, wn) {
+                if stake_wei >= min_stake_wei {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Read the live minStake threshold from the EpochDraw contract on Base
 /// mainnet. Owner-settable, so we MUST query the chain — never assume.
 fn read_min_stake_wei() -> Result<U256> {
