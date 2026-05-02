@@ -342,48 +342,54 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
     Ok(())
 }
 
-/// v3: ask the server's indexer which staker is backing this agent. The server
-/// scans AWPAllocator.Allocated events and returns the most recent allocation
-/// per (staker, worknet). We pick the first row whose amount >= MIN_STAKE on
-/// either Ardi or KYA worknet — that's the staker the contract will accept
-/// at commit-time eligibility check.
+/// v3: ask AWP rootnet RPC which staker(s) back this agent. AWP runs the
+/// canonical cross-chain Allocated indexer; we used to mirror it locally on
+/// coord-rs but switched 2026-05-02 to query api.awp.sh/v2 directly so we
+/// don't have to maintain a duplicate indexer.
 ///
-/// Returns Ok(None) when the server has no allocator index yet, or no
-/// matching allocation. Caller then falls back to Address::ZERO (self-stake).
-fn resolve_staker(api: &ApiClient, agent_addr: &str) -> Result<Option<Address>> {
+/// Strategy:
+///   * KYA worknet first — `staking.getAllocationsByAgentSubnet` returns rows
+///     ordered by amount desc. Take the highest with amount >= 10K AWP.
+///   * If no KYA allocation, check Ardi worknet for self-stake (staker == agent).
+///   * Returns Ok(None) when neither path resolves; caller hard-errors.
+///
+/// Source of truth is still on chain (`AWPAllocator.getAgentStake` at commit
+/// _requireEligible) — this RPC is only for *discovery*, so a stale or down
+/// AWP API just means the commit reverts cleanly.
+fn resolve_staker(_api: &ApiClient, agent_addr: &str) -> Result<Option<Address>> {
     const MIN_STAKE_AWP: u128 = 10_000;
     const ONE_AWP_WEI: u128 = 1_000_000_000_000_000_000;
     const MIN_STAKE_WEI: u128 = MIN_STAKE_AWP * ONE_AWP_WEI;
-    const ARDI_WN: &str = "845300000012";
-    const KYA_WN: &str = "845300000014";
+    // Verified against AWP subnets.get on 2026-05-02:
+    //   845300000014 = ARDI Worknet (self-stake)
+    //   845300000012 = KYA  Worknet (delegated stakes always land here)
+    const ARDI_WN: &str = "845300000014";
+    const KYA_WN: &str = "845300000012";
 
-    let resp: Option<serde_json::Value> =
-        api.try_get_json(&format!("/v1/agent/{agent_addr}/stakers"))?;
-    let Some(resp) = resp else { return Ok(None); };
-    let stakers = resp.get("stakers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-
+    let rpc = crate::awp_rpc::AwpRpc::new()?;
     let agent_lower = agent_addr.to_lowercase();
-    let mut best: Option<(Address, U256)> = None;
-    for row in &stakers {
-        let wn = row.get("worknet_id").and_then(|v| v.as_str()).unwrap_or("");
-        if wn != ARDI_WN && wn != KYA_WN {
-            continue;
-        }
-        let amount_str = row.get("amount_wei").and_then(|v| v.as_str()).unwrap_or("0");
-        let amount = U256::from_str_radix(amount_str, 10).unwrap_or(U256::ZERO);
-        if amount < U256::from(MIN_STAKE_WEI) {
-            continue;
-        }
-        let staker_str = row.get("staker").and_then(|v| v.as_str()).unwrap_or("");
-        let Ok(staker) = Address::from_str(staker_str) else { continue };
-        // Prefer self-stake (staker == agent) — no delegation, simplest path.
-        if staker_str.to_lowercase() == agent_lower {
-            return Ok(Some(staker));
-        }
-        // Otherwise hold onto the highest-stake delegated row.
-        if best.as_ref().map_or(true, |(_, a)| amount > *a) {
-            best = Some((staker, amount));
+
+    // KYA delegated path — by design, all sponsored stakes go to KYA worknet.
+    if let Ok(rows) = rpc.allocations_by_agent_worknet(agent_addr, KYA_WN, None) {
+        for row in &rows {
+            let amount = U256::from_str_radix(&row.amount, 10).unwrap_or(U256::ZERO);
+            if amount < U256::from(MIN_STAKE_WEI) { continue; }
+            let Ok(staker) = Address::from_str(&row.user_address) else { continue };
+            return Ok(Some(staker)); // first row is highest by API contract
         }
     }
-    Ok(best.map(|(s, _)| s))
+
+    // Self-stake — agent staked their own veAWP allocation on Ardi worknet.
+    if let Ok(rows) = rpc.allocations_by_agent_worknet(agent_addr, ARDI_WN, None) {
+        for row in &rows {
+            let amount = U256::from_str_radix(&row.amount, 10).unwrap_or(U256::ZERO);
+            if amount < U256::from(MIN_STAKE_WEI) { continue; }
+            // Strict self-stake: staker == agent.
+            if row.user_address.to_lowercase() == agent_lower {
+                return Ok(Some(Address::from_str(&row.user_address)?));
+            }
+        }
+    }
+
+    Ok(None)
 }

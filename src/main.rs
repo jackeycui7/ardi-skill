@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 
 mod auth;
 mod awp_register;
+mod awp_rpc;
 mod chain;
 mod client;
 mod cmd;

@@ -16,12 +16,16 @@ use std::str::FromStr;
 
 use crate::auth::get_address;
 use crate::chain::AWPAllocator;
-use crate::client::ApiClient;
 use crate::output::{Internal, Output};
 use crate::tx;
 
-const ARDI_WORKNET_ID: &str = "845300000012";
-const KYA_WORKNET_ID: &str = "845300000014";
+// Worknet IDs verified 2026-05-02 against AWP API subnets.get:
+//   845300000014 = "AWP ARDI Worknet" (aARDI) — self-stakers lock veAWP here
+//   845300000012 = "AWP KYA Worknet" (aKYA) — KYA-delegated stakes always go here
+// (Earlier versions had these reversed; the contract was hot-fixed via
+//  setWorknetIds. Both worknets are still checked OR-style for eligibility.)
+const ARDI_WORKNET_ID: &str = "845300000014";
+const KYA_WORKNET_ID: &str = "845300000012";
 const VE_AWP: &str = "0x0000b534C63D78212f1BDCc315165852793A00A8";
 const AWP_ALLOCATOR: &str = "0x0000D6BB5e040E35081b3AaF59DD71b21C9800AA";
 const MIN_STAKE_AWP: u128 = 10_000;
@@ -49,27 +53,25 @@ fn read_alloc(staker: Address, agent: Address, worknet_id_str: &str) -> Result<U
     Ok(decoded._0)
 }
 
-pub fn run(server_url: &str) -> Result<()> {
+pub fn run(_server_url: &str) -> Result<()> {
     let address_str = get_address()?;
     let agent = Address::from_str(&address_str)?;
     let min_stake_wei = U256::from(MIN_STAKE_AWP) * U256::from(ONE_AWP_WEI);
 
-    // Build the candidate staker set:
-    //   - self (agent itself, for the self-stake path)
-    //   - every staker the indexer has seen allocate to this agent
+    // Build the candidate staker set from AWP rootnet RPC. AWP indexes
+    // Allocated events across all chains; we ask both worknets and union
+    // the staker addresses, then verify each on chain. Self (agent) is
+    // always included so a fresh self-stake doesn't get skipped while AWP
+    // is indexing.
     let mut stakers: BTreeMap<String, Address> = BTreeMap::new();
     stakers.insert(format!("0x{:x}", agent), agent);
 
-    let api = ApiClient::new(server_url)?;
-    if let Ok(Some(resp)) =
-        api.try_get_json::<serde_json::Value>(&format!("/v1/agent/{address_str}/stakers"))
-    {
-        if let Some(arr) = resp.get("stakers").and_then(|v| v.as_array()) {
-            for row in arr {
-                if let Some(s) = row.get("staker").and_then(|v| v.as_str()) {
-                    if let Ok(addr) = Address::from_str(s) {
-                        stakers.insert(format!("0x{:x}", addr), addr);
-                    }
+    let rpc = crate::awp_rpc::AwpRpc::new()?;
+    for wn in [ARDI_WORKNET_ID, KYA_WORKNET_ID] {
+        if let Ok(rows) = rpc.allocations_by_agent_worknet(&address_str, wn, None) {
+            for r in rows {
+                if let Ok(addr) = Address::from_str(&r.user_address) {
+                    stakers.insert(format!("0x{:x}", addr), addr);
                 }
             }
         }
@@ -208,7 +210,7 @@ pub fn run(server_url: &str) -> Result<()> {
         "NOT_STAKED",
         "stake",
         false,
-        "Reach the 10,000 AWP threshold on EITHER Ardi (845300000012) OR KYA (845300000014) worknet, then re-run.",
+        "Reach the 10,000 AWP threshold on EITHER Ardi (845300000014) OR KYA (845300000012) worknet, then re-run.",
         json!({
             "address": address_str,
             "eligible": false,
