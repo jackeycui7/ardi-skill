@@ -100,8 +100,12 @@ pub fn ensure_registered(address: &str) -> Result<RegistrationResult> {
     let relay_resp: Value = client
         .post(format!("{AWP_RELAY_BASE}/relay/set-recipient"))
         .json(&json!({
+            // v2 API: the relay expects "user" (the staker / owner address),
+            // not "agent" (which was the v1 name). Confirmed by probing the
+            // endpoint: with "agent" it returns 400 "invalid user address";
+            // with "user" it advances to signature validation.
             "chainId": CHAIN_ID,
-            "agent": address,
+            "user": address,
             "recipient": address,
             "deadline": deadline,
             "signature": signature,
