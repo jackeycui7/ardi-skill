@@ -1,6 +1,6 @@
 [package]
 name = "ardi-agent"
-version = "0.3.5"
+version = "0.4.0"
 edition = "2021"
 description = "CLI agent for AWP Ardi WorkNet — solve riddles, mint Ardinal NFTs"
 license = "MIT"
@@ -25,14 +25,12 @@ sha3 = "0.10"
 hex = "0.4"
 rand = "0.8"
 ctrlc = "3"
+# v0.4.0: dropped alloy-consensus / alloy-signer / alloy-signer-local /
+# alloy-network / alloy-rlp / alloy-dyn-abi. All signing now goes through
+# `awp-wallet send-tx` and `awp-wallet sign-typed-data`; ardi-agent never
+# touches private keys, so the local crypto stack is no longer needed.
 alloy-primitives = "0.8"
 alloy-sol-types = "0.8"
-alloy-consensus = "0.8"
-alloy-signer = "0.8"
-alloy-signer-local = "0.8"
-alloy-network = "0.8"
-alloy-rlp = "0.3"
-alloy-dyn-abi = { version = "0.8", features = ["eip712"] }
 
 [profile.release]
 opt-level = "z"

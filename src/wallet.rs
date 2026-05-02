@@ -1,29 +1,26 @@
-// Wallet — sign + broadcast EIP-1559 txs entirely in this process.
+// Wallet — sign + broadcast EVM txs by delegating to awp-wallet.
 //
-// Single key source: awp-wallet export-private-key. We shell out, get
-// the key, hold it in memory just long enough to build a signer, sign,
-// drop. Key is never persisted, logged, or written to disk by us.
+// v0.4.0: removed all private-key extraction. Previously this module
+// shelled out to `awp-wallet export-private-key`, parsed the raw 32-byte
+// key, and signed locally with alloy. That approach contradicted
+// awp-wallet's "skill never sees, logs, or transmits private keys"
+// principle and broke whenever awp-wallet shipped without that command.
 //
-// Signing is done with alloy_signer_local::PrivateKeySigner against an
-// EIP-1559 tx envelope, then broadcast via eth_sendRawTransaction through
-// our RPC pool.
-//
-// We deliberately do NOT support reading a raw key from env. End users
-// should use awp-wallet — the standard AWP wallet skill — and not be
-// invited to paste private keys into shell config.
+// Now: every signing path goes through awp-wallet's own subcommands.
+// Requires awp-wallet >= 1.5.0 (which introduced `send-tx` for
+// arbitrary calldata). The version check at first use surfaces a clear
+// error if an older awp-wallet is installed.
 
 use anyhow::{anyhow, Context, Result};
-use alloy_consensus::{SignableTransaction, TxEip1559};
-use alloy_network::TxSignerSync;
-use alloy_primitives::{Address, Bytes, TxKind, U256};
-use alloy_rlp::Encodable;
-use alloy_signer_local::PrivateKeySigner;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
 
 use crate::log_debug;
-use crate::rpc;
+
+/// Lowest awp-wallet version that ships `send-tx` + `sign-typed-data`
+/// with the JSON output shape this module parses.
+const MIN_AWP_WALLET: (u32, u32, u32) = (1, 5, 0);
 
 #[derive(Debug, Default, Clone)]
 pub struct WalletStatus {
@@ -54,7 +51,7 @@ impl WalletStatus {
                     if let Ok(v) = serde_json::from_str::<Value>(&txt) {
                         // awp-wallet returns {"eoaAddress":"0x..."} (current
                         // schema); older builds returned {"address":"0x..."}.
-                        // Accept both — no minimum version required.
+                        // Accept both.
                         if let Some(addr) = v
                             .get("eoaAddress")
                             .or_else(|| v.get("address"))
@@ -134,53 +131,62 @@ fn which(bin: &str) -> Result<PathBuf> {
     Err(anyhow!("`{bin}` not found on PATH"))
 }
 
-/// Resolve the private key for signing. Caller is responsible for not
-/// persisting / logging the returned string.
-fn resolve_private_key() -> Result<String> {
-    let bin = which("awp-wallet").context(
+fn awp_wallet_bin() -> Result<PathBuf> {
+    which("awp-wallet").context(
         "awp-wallet not installed. Install via: \
          `git clone https://github.com/awp-core/awp-wallet ~/awp-wallet && \
           cd ~/awp-wallet && bash install.sh && awp-wallet setup`",
-    )?;
-    log_debug!("resolve_private_key: shelling out to awp-wallet export-private-key");
-    // awp-wallet returns {"privateKey":"0x...","address":"0x...","warning":"..."}
-    // immediately, no confirm prompt — wallet is unlocked-by-default. Both
-    // "privateKey" and "private_key" snake_case shapes are accepted below.
-    let out = Command::new(&bin)
-        .arg("export-private-key")
-        .output()
-        .context("failed to invoke awp-wallet export-private-key")?;
-    if !out.status.success() {
-        return Err(anyhow!(
-            "awp-wallet export-private-key failed (exit {:?}): {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    // awp-wallet may emit either {"privateKey":"0x..."} or a plain 0x... line.
-    if let Ok(v) = serde_json::from_str::<Value>(stdout.trim()) {
-        if let Some(pk) = v
-            .get("privateKey")
-            .or_else(|| v.get("private_key"))
-            .and_then(|x| x.as_str())
-        {
-            return Ok(pk.to_string());
-        }
-    }
-    let trimmed = stdout.trim().to_string();
-    if trimmed.starts_with("0x") && trimmed.len() == 66 {
-        return Ok(trimmed);
-    }
-    Err(anyhow!(
-        "awp-wallet export-private-key returned unexpected output (expected JSON {{privateKey:0x...}} or bare 0x... line)"
-    ))
+    )
 }
 
-/// Sign + broadcast an EIP-1559 transaction. The `tx` JSON is the same
-/// shape `tx::build_tx` produces. Returns the broadcast tx hash.
+/// Read awp-wallet --version and return (major, minor, patch).
+fn awp_wallet_version(bin: &PathBuf) -> Result<(u32, u32, u32)> {
+    let out = Command::new(bin)
+        .arg("--version")
+        .output()
+        .context("failed to run `awp-wallet --version`")?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let trimmed = s.trim();
+    let parts: Vec<&str> = trimmed.split('.').collect();
+    if parts.len() < 3 {
+        return Err(anyhow!("unparseable awp-wallet version: '{trimmed}'"));
+    }
+    let parse = |p: &str| -> Result<u32> {
+        p.parse::<u32>()
+            .map_err(|e| anyhow!("awp-wallet version part '{p}' not numeric: {e}"))
+    };
+    Ok((parse(parts[0])?, parse(parts[1])?, parse(parts[2])?))
+}
+
+/// Verify awp-wallet is recent enough for the subcommands this module uses.
+/// Called once at the top of every signing entry point.
+fn require_min_wallet(bin: &PathBuf) -> Result<()> {
+    let (a, b, c) = awp_wallet_version(bin)?;
+    let (ra, rb, rc) = MIN_AWP_WALLET;
+    let cur = (a, b, c);
+    let req = (ra, rb, rc);
+    if cur < req {
+        return Err(anyhow!(
+            "awp-wallet {a}.{b}.{c} too old; need >= {ra}.{rb}.{rc} \
+             (introduces `send-tx` for arbitrary contract calls). \
+             Upgrade: `cd ~/awp-wallet && git pull && bash install.sh`"
+        ));
+    }
+    Ok(())
+}
+
+/// Sign + broadcast an EIP-1559 transaction by delegating to
+/// `awp-wallet send-tx`. Private key never enters this process.
+///
+/// `tx` is the same JSON shape `tx::build_tx` produces (legacy interface
+/// preserved for callers). We extract the fields awp-wallet needs and
+/// pass them as CLI flags. awp-wallet auto-estimates gas + maxFee + nonce
+/// when omitted, but we pass through caller-supplied values to keep the
+/// caller in control of the gas budget.
 pub fn send_tx(tx: &Value) -> Result<String> {
-    // Pull required fields from the tx JSON.
+    let bin = awp_wallet_bin()?;
+    require_min_wallet(&bin)?;
+
     let to = tx
         .get("to")
         .and_then(|v| v.as_str())
@@ -188,107 +194,112 @@ pub fn send_tx(tx: &Value) -> Result<String> {
     let data_hex = tx
         .get("data")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("tx missing `data`"))?;
+        .unwrap_or("0x");
     let value_hex = tx
         .get("value")
         .and_then(|v| v.as_str())
         .unwrap_or("0x0");
-    let nonce = tx
-        .get("nonce")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| anyhow!("tx missing `nonce`"))?;
-    let gas_hex = tx
-        .get("gas")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("tx missing `gas`"))?;
-    let max_fee_hex = tx
-        .get("maxFeePerGas")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("tx missing `maxFeePerGas`"))?;
-    let max_prio_hex = tx
-        .get("maxPriorityFeePerGas")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("tx missing `maxPriorityFeePerGas`"))?;
     let chain_id = tx
         .get("chainId")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| anyhow!("tx missing `chainId`"))?;
 
-    let to_addr: Address = to
-        .parse()
-        .map_err(|e| anyhow!("invalid `to` address: {e}"))?;
-    let value_u256 = U256::from_str_radix(value_hex.trim_start_matches("0x"), 16)
-        .map_err(|e| anyhow!("invalid `value` hex: {e}"))?;
-    let gas = u64::from_str_radix(gas_hex.trim_start_matches("0x"), 16)
-        .map_err(|e| anyhow!("invalid `gas`: {e}"))?;
-    let max_fee = u128::from_str_radix(max_fee_hex.trim_start_matches("0x"), 16)
-        .map_err(|e| anyhow!("invalid `maxFeePerGas`: {e}"))?;
-    let max_prio = u128::from_str_radix(max_prio_hex.trim_start_matches("0x"), 16)
-        .map_err(|e| anyhow!("invalid `maxPriorityFeePerGas`: {e}"))?;
-    let data_bytes = hex::decode(data_hex.trim_start_matches("0x"))
-        .map_err(|e| anyhow!("invalid `data` hex: {e}"))?;
+    // Convert 0x-hex value/gas/nonce to decimal strings for awp-wallet's CLI.
+    let value_dec = u128::from_str_radix(value_hex.trim_start_matches("0x"), 16)
+        .map_err(|e| anyhow!("invalid `value` hex: {e}"))?
+        .to_string();
 
-    // Resolve key + immediately use to build a signer; don't keep the hex
-    // string around longer than necessary.
-    let pk = resolve_private_key()?;
-    let signer: PrivateKeySigner = pk
-        .parse()
-        .map_err(|e| anyhow!("private key parse failed: {e}"))?;
-    drop(pk); // best-effort scrub
+    let mut cmd = Command::new(&bin);
+    cmd.arg("--chain")
+        .arg(chain_id.to_string())
+        .arg("send-tx")
+        .arg("--to")
+        .arg(to)
+        .arg("--data")
+        .arg(data_hex)
+        .arg("--value")
+        .arg(&value_dec);
 
-    let mut unsigned = TxEip1559 {
-        chain_id,
-        nonce,
-        gas_limit: gas,
-        max_fee_per_gas: max_fee,
-        max_priority_fee_per_gas: max_prio,
-        to: TxKind::Call(to_addr),
-        value: value_u256,
-        access_list: Default::default(),
-        input: Bytes::from(data_bytes),
-    };
+    // Pass gas + nonce if the caller supplied them; otherwise let
+    // awp-wallet auto-estimate.
+    if let Some(gas_hex) = tx.get("gas").and_then(|v| v.as_str()) {
+        let gas = u64::from_str_radix(gas_hex.trim_start_matches("0x"), 16)
+            .map_err(|e| anyhow!("invalid `gas`: {e}"))?;
+        cmd.arg("--gas").arg(gas.to_string());
+    }
+    if let Some(nonce) = tx.get("nonce").and_then(|v| v.as_u64()) {
+        cmd.arg("--nonce").arg(nonce.to_string());
+    }
 
-    let signature = signer
-        .sign_transaction_sync(&mut unsigned)
-        .map_err(|e| anyhow!("EIP-1559 sign failed: {e}"))?;
-    let signed = unsigned.into_signed(signature);
+    log_debug!(
+        "send_tx: shelling out to awp-wallet send-tx --to {to} --value {value_dec} --chain {chain_id}"
+    );
+    let out = cmd
+        .output()
+        .context("failed to invoke `awp-wallet send-tx`")?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
 
-    // RLP-encode envelope as 0x02 || rlp(signed).
-    let mut raw = Vec::with_capacity(256);
-    raw.push(0x02);
-    signed.rlp_encode(&mut raw);
+    if !out.status.success() {
+        return Err(anyhow!(
+            "awp-wallet send-tx failed (exit {:?}): {} {}",
+            out.status.code(),
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
 
-    // Broadcast.
-    let raw_hex = format!("0x{}", hex::encode(&raw));
-    let r = rpc::call("eth_sendRawTransaction", json!([raw_hex]))?;
-    let hash = r
-        .as_str()
-        .ok_or_else(|| anyhow!("eth_sendRawTransaction returned non-string: {r}"))?
+    let v: Value = serde_json::from_str(stdout.trim())
+        .map_err(|e| anyhow!("awp-wallet send-tx returned non-JSON: {stdout} ({e})"))?;
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(anyhow!("awp-wallet send-tx reported error: {err}"));
+    }
+    let hash = v
+        .get("txHash")
+        .or_else(|| v.get("transactionHash"))
+        .or_else(|| v.get("hash"))
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| {
+            anyhow!("awp-wallet send-tx response missing txHash field: {v}")
+        })?
         .to_string();
     Ok(hash)
 }
 
 /// EIP-712 typed data signing — used by AWP gasless registration.
-/// Same dual key path. Computes the EIP-712 digest via alloy_dyn_abi
-/// then sign-hashes with the local signer (sync, no tokio).
+/// Delegates to `awp-wallet sign-typed-data`. Returns the 0x-prefixed
+/// 65-byte signature hex.
 pub fn sign_typed_data(typed_data_json: &Value) -> Result<String> {
-    use alloy_dyn_abi::TypedData;
-    use alloy_signer::SignerSync;
+    let bin = awp_wallet_bin()?;
+    require_min_wallet(&bin)?;
 
-    let pk = resolve_private_key()?;
-    let signer: PrivateKeySigner = pk
-        .parse()
-        .map_err(|e| anyhow!("private key parse failed: {e}"))?;
-    drop(pk);
-
-    let typed: TypedData = serde_json::from_value(typed_data_json.clone())
-        .map_err(|e| anyhow!("typed data parse failed: {e}"))?;
-    let digest = typed
-        .eip712_signing_hash()
-        .map_err(|e| anyhow!("EIP-712 digest compute failed: {e}"))?;
-    let signature = signer
-        .sign_hash_sync(&digest)
-        .map_err(|e| anyhow!("EIP-712 hash sign failed: {e}"))?;
-
-    Ok(format!("0x{}", hex::encode(signature.as_bytes())))
+    let payload = serde_json::to_string(typed_data_json)
+        .map_err(|e| anyhow!("typed data serialize failed: {e}"))?;
+    let out = Command::new(&bin)
+        .arg("sign-typed-data")
+        .arg("--data")
+        .arg(&payload)
+        .output()
+        .context("failed to invoke `awp-wallet sign-typed-data`")?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        return Err(anyhow!(
+            "awp-wallet sign-typed-data failed (exit {:?}): {} {}",
+            out.status.code(),
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
+    let v: Value = serde_json::from_str(stdout.trim())
+        .map_err(|e| anyhow!("awp-wallet sign-typed-data returned non-JSON: {stdout} ({e})"))?;
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(anyhow!("awp-wallet sign-typed-data error: {err}"));
+    }
+    let sig = v
+        .get("signature")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| anyhow!("awp-wallet sign-typed-data response missing signature: {v}"))?
+        .to_string();
+    Ok(sig)
 }
