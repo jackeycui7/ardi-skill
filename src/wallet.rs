@@ -219,6 +219,21 @@ pub fn send_tx(tx: &Value) -> Result<String> {
     // so they don't all grab the same chain nonce. Held until function exit.
     let _lock = acquire_send_tx_lock()?;
 
+    // Re-fetch nonce UNDER the lock. tx::build_tx fetches nonce when it
+    // composes the envelope, but that happens before this lock is held —
+    // so two parallel `commit` invocations both pull nonce N from RPC,
+    // then queue at this lock; the second one would broadcast with stale
+    // N and the node rejects with "nonce too low: next nonce N+1, tx
+    // nonce N". Reproduced 2026-05-03 by a tester firing 5 commits
+    // in parallel: 1 landed, 4 lost. The lock alone wasn't enough.
+    // Now: discard the caller-supplied nonce, let awp-wallet fetch
+    // fresh inside the lock window (mempool has propagated by then).
+    let mut tx = tx.clone();
+    if let Some(obj) = tx.as_object_mut() {
+        obj.remove("nonce");
+    }
+    let tx = &tx;
+
     let to = tx
         .get("to")
         .and_then(|v| v.as_str())

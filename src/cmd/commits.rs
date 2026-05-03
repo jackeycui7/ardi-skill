@@ -11,8 +11,25 @@ use crate::output::{Internal, Output};
 use crate::state::{CommitStatus, State};
 
 pub fn run(_server_url: &str) -> Result<()> {
-    let st = State::load()?;
+    let mut st = State::load()?;
     let now = chrono::Utc::now().timestamp();
+
+    // Backfill: any Inscribed/Won row that's missing token_id was written by
+    // pre-v0.5.9 inscribe (which never recorded the tokenId). V3 derives
+    // tokenId = wordId + 1 deterministically, so we can repair retroactively
+    // without an RPC call. This eliminates the "ardi-agent commits says
+    // token_id:null but ardi-agent status / chain says #1869 is mine" lie
+    // that misled testers into thinking they hadn't won.
+    let mut backfilled = 0;
+    for c in st.pending.values_mut() {
+        if matches!(c.status, CommitStatus::Inscribed | CommitStatus::Won) && c.token_id.is_none() {
+            c.token_id = Some(c.word_id + 1);
+            backfilled += 1;
+        }
+    }
+    if backfilled > 0 {
+        st.save()?;
+    }
 
     let mut rows: Vec<serde_json::Value> = Vec::new();
     for c in st.pending.values() {

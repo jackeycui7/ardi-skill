@@ -185,7 +185,13 @@ pub fn run(server_url: &str) -> Result<()> {
         }),
         Internal {
             next_action: "ready".into(),
-            next_command: Some("ardi-agent mine".into()),
+            // Was "ardi-agent mine" — that subcommand never existed in the
+            // skill (the auto-mine helper lives in `tools/auto-mine/` as a
+            // separate systemd unit). LLM agents that obey
+            // _internal.next_command verbatim hit "unrecognized subcommand".
+            // Send them to `context` instead, which is the actual
+            // entry-point for the per-epoch loop.
+            next_command: Some("ardi-agent context".into()),
             progress: Some("5/5".into()),
         },
     )

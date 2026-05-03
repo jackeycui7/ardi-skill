@@ -59,6 +59,13 @@ sol! {
         ) external;
         function winners(uint256 epochId, uint256 wordId) external view returns (address);
         function agentWinCount(address agent) external view returns (uint8);
+        // Number of correct revealers for this (epoch, wordId). Used by
+        // inscribe to disambiguate "VRF still pending" (count > 0, no winner
+        // yet) from "no correct revealers — your guess was wrong" (count
+        // == 0, no winner ever). Pre-v0.5.9 the error message conflated
+        // these two cases and users had no way to tell whether to keep
+        // waiting or give up.
+        function correctCount(uint256 epochId, uint256 wordId) external view returns (uint256);
         // Live threshold (commit reverts if agent's summed stake < this).
         // Owner-settable via setMinStake; skill MUST read live, not hardcode.
         function minStake() external view returns (uint256);

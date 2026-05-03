@@ -116,10 +116,62 @@ pub fn run(server_url: &str, epoch_id: u64, word_id: u64) -> Result<()> {
     let winner = Address::from_slice(&raw[12..32]);
 
     if winner == Address::ZERO {
-        // VRF hasn't fired yet, or no candidates.
+        // Disambiguate: "VRF still pending" (correct revealers exist, draw
+        // is in flight) vs "your guess was wrong" (no correct revealers,
+        // winner will stay 0x0 forever). Pre-v0.5.9 these were one error
+        // and users wasted 16+ retries on words they'd already lost.
+        let cc_call = ArdiEpochDraw::correctCountCall {
+            epochId: U256::from(epoch_id),
+            wordId: U256::from(word_id),
+        };
+        let cc_raw = tx::view_call(&draw_addr, cc_call.abi_encode())?;
+        let candidates = if cc_raw.len() >= 32 {
+            U256::from_be_slice(&cc_raw[..32])
+        } else {
+            U256::ZERO
+        };
+
+        if candidates == U256::ZERO {
+            // No correct revealers — VRF will never fire for this wordId.
+            // Mark Lost so `commits` stops suggesting inscribe + future
+            // inscribe calls short-circuit with the right message.
+            if let Some(e) = st.get_mut(epoch_id, word_id) {
+                e.status = CommitStatus::Lost;
+            }
+            st.save()?;
+            Output::success(
+                "No correct revealers for this riddle — your answer didn't match the canonical hash. Bond was refunded on reveal; nothing more to do here.",
+                json!({
+                    "epoch_id": epoch_id,
+                    "word_id": word_id,
+                    "candidates": "0",
+                    "answer_was": entry.answer,
+                    "vrf_state": "no_candidate_pool",
+                }),
+                Internal {
+                    next_action: "no_candidate_pool".into(),
+                    next_command: None,
+                    ..Default::default()
+                },
+            )
+            .print();
+            return Ok(());
+        }
+
+        // Real VRF wait. Base mainnet Chainlink VRF v2.5 callbacks typically
+        // take 1-3 minutes (not 30s — that was a docs lie that misled every
+        // tester). Worst case 8-10 min observed in the wild.
         Output::success(
-            "Winner not yet picked (VRF still pending or no correct revealers). Try again in 30s.",
-            json!({ "epoch_id": epoch_id, "word_id": word_id, "winner": "0x0" }),
+            format!(
+                "VRF pending — {candidates} correct revealer(s), draw in flight. Base VRF callback usually lands in 1-3 min (worst case 10 min). Retry in 60s."
+            ),
+            json!({
+                "epoch_id": epoch_id,
+                "word_id": word_id,
+                "winner": "0x0",
+                "candidates": candidates.to_string(),
+                "vrf_state": "pending",
+            }),
             Internal {
                 next_action: "wait_vrf".into(),
                 next_command: Some(format!(
@@ -161,32 +213,27 @@ pub fn run(server_url: &str, epoch_id: u64, word_id: u64) -> Result<()> {
     let tx_obj = tx::build_tx(&agent, &nft_addr, data, 0, 350_000)?;
     let tx_hash = tx::send_and_wait(&tx_obj).context("send inscribe tx")?;
 
+    // V3 contract: tokenId = wordId + 1 (ArdiNFTv3.sol:384). Deterministic
+    // — no need to parse Inscribed event logs to learn the tokenId. Pre-v0.5.9
+    // we left e.token_id = None and printed `totalInscribed` (the running
+    // count, NOT the just-minted tokenId), so `commits` would later show
+    // `status=inscribed token_id=null` and the success line was wrong:
+    // `Ardinal #3` instead of `Ardinal #1869`. Two-line fix.
+    let token_id = word_id + 1;
     if let Some(e) = st.get_mut(epoch_id, word_id) {
         e.status = CommitStatus::Inscribed;
         e.inscribe_tx = Some(tx_hash.clone());
-        // token_id determinable from receipt logs; we leave it None for now,
-        // the `nft` command can backfill by reading totalInscribed sequence.
+        e.token_id = Some(token_id);
     }
     st.save()?;
-
-    // Try totalInscribed to infer token_id (simpler than parsing logs).
-    let ti = tx::view_call(
-        &nft_addr,
-        ArdiNFT::totalInscribedCall {}.abi_encode(),
-    )?;
-    let total = if ti.len() >= 32 {
-        U256::from_be_slice(&ti[..32])
-    } else {
-        U256::ZERO
-    };
 
     let mut data = json!({
         "epoch_id": epoch_id,
         "word_id": word_id,
         "tx_hash": tx_hash,
-        "token_id_estimate": total.to_string(),
+        "token_id": token_id,
     });
-    let mut message = format!("🎉 Inscribed Ardinal #{total} — tx={tx_hash}");
+    let mut message = format!("🎉 Inscribed Ardinal #{token_id} — tx={tx_hash}");
     if let Some((warn_payload, warn_msg)) =
         crate::cmd::gas::low_balance_warning(&agent_str)
     {

@@ -17,7 +17,18 @@ set -e
 REPO="jackeycui7/ardi-skill"
 # ─────────────────────────────────────────────────────────────────────
 
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+# Default install dir: ~/.local/bin if writable (no sudo needed); fall
+# back to /usr/local/bin only if user explicitly opts in via INSTALL_DIR.
+# Pre-v0.5.9 default was /usr/local/bin which prompted for sudo on macOS
+# the first time anyone ran the curl|sh one-liner — broke the
+# unattended-install path that LLM agents follow.
+if [ -z "${INSTALL_DIR:-}" ]; then
+  if [ -w "${HOME}/.local/bin" ] 2>/dev/null || mkdir -p "${HOME}/.local/bin" 2>/dev/null; then
+    INSTALL_DIR="${HOME}/.local/bin"
+  else
+    INSTALL_DIR="/usr/local/bin"
+  fi
+fi
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"

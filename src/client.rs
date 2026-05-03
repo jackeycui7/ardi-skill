@@ -27,13 +27,41 @@ impl ApiClient {
         &self.base
     }
 
+    /// GET with internal retry. coord-rs sits behind nginx + a long-running
+    /// process; restarts and brief TLS handshake EOFs do happen
+    /// (reproduced 2026-05-03 by a tester whose `inscribe` poll loop
+    /// died on a single transient TLS error). 3 attempts with 1s/2s
+    /// backoff covers a coord watchdog restart (~3s downtime) without
+    /// surfacing the blip to the LLM as a hard failure.
+    fn get_with_retry(&self, path: &str) -> Result<reqwest::blocking::Response> {
+        let url = format!("{}{}", self.base, path);
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_secs(1u64 << (attempt - 1))); // 1s, 2s
+            }
+            match self.http.get(&url).send() {
+                Ok(r) => {
+                    // Retry on transient 5xx; 4xx is the caller's fault.
+                    let s = r.status().as_u16();
+                    if s >= 500 && s < 600 && attempt < 2 {
+                        last_err = Some(anyhow!("HTTP {s} from {url} (attempt {})", attempt + 1));
+                        continue;
+                    }
+                    return Ok(r);
+                }
+                Err(e) => {
+                    last_err = Some(anyhow!("GET {url} (attempt {}): {e}", attempt + 1));
+                    continue;
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow!("GET {url}: 3 attempts failed")))
+    }
+
     pub fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base, path);
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .with_context(|| format!("GET {url}"))?;
+        let resp = self.get_with_retry(path)?;
         let status = resp.status();
         let text = resp.text().unwrap_or_default();
         if !status.is_success() {
@@ -45,11 +73,7 @@ impl ApiClient {
 
     pub fn try_get_json<T: DeserializeOwned>(&self, path: &str) -> Result<Option<T>> {
         let url = format!("{}{}", self.base, path);
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .with_context(|| format!("GET {url}"))?;
+        let resp = self.get_with_retry(path)?;
         if resp.status().as_u16() == 404 {
             return Ok(None);
         }
