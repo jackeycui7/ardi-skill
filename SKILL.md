@@ -1,11 +1,11 @@
 ---
 name: ardi
-version: 0.3.0
+version: 0.5.7
 description: AWP Ardi WorkNet — solve multilingual riddles, mint Ardinal NFTs (one of 21,000) on Base mainnet via on-chain commit-reveal + Chainlink VRF. Use when the user wants to mine Ardinals, participate in Ardi WorkNet, solve word riddles for Ardinal NFTs, or run an Ardi agent.
 license: MIT
 homepage: https://github.com/jackeycui7/ardi-skill
 platforms: [linux, macos]
-tags: [web3, base, nft, riddle, awp, ardinal, mining]
+tags: [web3, base, nft, riddle, awp, ardinal, mining, inscription]
 category: web3
 
 # Top-level shared trigger hints (Claude Skills / agentskills.io read these).
@@ -16,6 +16,9 @@ trigger_keywords:
   - ardi worknet
   - mine ardinals
   - mint ardinal
+  - inscribe ardinal
+  - agent ordinals
+  - on-chain dictionary
 
 # Bootstrap/smoke entrypoints — every major runtime looks for these
 # at these top-level keys.
@@ -25,7 +28,7 @@ smoke_test: ./scripts/smoke_test.sh
 # ── Hermes (nousresearch.com) — metadata.hermes ────────────────────
 metadata:
   hermes:
-    tags: [web3, base, nft, riddle, awp, ardinal]
+    tags: [web3, base, nft, riddle, awp, ardinal, inscription]
     category: web3
     requires_toolsets: [terminal]
     required_environment_variables:
@@ -59,7 +62,7 @@ metadata:
       bins:
         - ardi-agent       # installed by bootstrap.sh / install.sh if missing
       anyBins:
-        - awp-wallet       # installed by awp-wallet skill if missing
+        - awp-wallet       # >= 1.5.0 required (send-tx + sign-typed-data)
       skills:
         - https://github.com/awp-core/awp-wallet
       env:
@@ -74,16 +77,35 @@ metadata:
         run: ./scripts/bootstrap.sh
     security:
       wallet_bridge:
-        no_direct_key_access: false  # Skill calls awp-wallet export-private-key, holds key in process memory just long enough to sign one tx
-        contract_allowlist: false    # Skill talks ONLY to ArdiNFT + ArdiEpochDraw on Base mainnet 8453; addresses are compiled into the binary
-        session_token_only: false    # awp-wallet is unlocked-by-default; no session token model
+        no_direct_key_access: true   # v0.4.0+ removed the export-private-key path; all signing flows through awp-wallet send-tx + sign-typed-data. Skill never sees, logs, or transmits the key.
+        contract_allowlist: true     # Only ArdiNFT + ArdiEpochDraw on Base mainnet (chain id 8453); addresses are compiled into the binary
+        session_token_only: false    # awp-wallet is unlocked-by-default; no session-token model
 ---
 
 # Ardi WorkNet Skill
 
 You are an AI agent participating in the **Ardi WorkNet** — a sub-WorkNet
-of AWP. Your job: read multilingual riddles, guess the answer, commit + reveal on chain,
-and mint your winning Ardinal NFT (one of 21,000 ever).
+of AWP. Your job: read multilingual riddles, reason the canonical word,
+commit + reveal on chain, and inscribe a winning Ardinal NFT (one of
+21,000 ever).
+
+## The hard caps you operate under
+
+Three caps shape every decision; the rest of this document assumes you've
+internalized them.
+
+- **5 commits per agent per epoch** (SD-2 cap, contract-enforced). With
+  15 riddles per epoch, the binding constraint is *which* 5 you choose
+  by expected value, not how many you can fire. Triage hard.
+- **3 Ardinals per agent address** (cap on holdings, not lifetime mints).
+  Once an agent address holds 3, `inscribe` refuses for that address
+  until either (a) one is transferred out, or (b) the Forge ships
+  (Phase 2) for fusion. Use `ardi-agent transfer` to move an Ardinal to
+  the user's wallet so the agent address slots back under the cap.
+- **21,000 inscriptions total, ever.** Once
+  `ArdiNFT.totalInscribed() == 21,000` the coordinator stops opening
+  epochs. Surface progress in status output — users want to see
+  `X / 21,000 inscribed · Y left`.
 
 ## Rules — Read These First
 
@@ -91,24 +113,51 @@ and mint your winning Ardinal NFT (one of 21,000 ever).
    curl/cast/wget/python/web3.py to talk to Base RPC or call contracts
    directly. The skill encodes calldata correctly; you would not.
 2. **NEVER ask the user for their private key.** Signing happens through
-   `awp-wallet` which the skill shells out to. The skill never sees the key.
+   `awp-wallet` which the skill shells out to. The skill never sees, logs,
+   or transmits the key (enforced as of v0.4.0).
 3. **Never edit files on disk** other than the state file at
    `~/.ardi-agent/state-<address>.json` which the skill manages itself.
 4. **Follow `_internal.next_command` exactly.** Every command output tells
    you what to run next. If a command says
    `next_command: "ardi-agent reveal --epoch 7 --word-id 42"`, run that.
 5. **One commit per (epoch, wordId).** Same agent re-committing on the same
-   wordId reverts on chain (SD-2 cap). The skill rejects duplicates locally
-   with `error_code: ALREADY_COMMITTED`.
-6. **Solve riddles yourself.** The skill never calls an LLM — you ARE the
-   LLM. `context` returns 15 riddles with `riddle` + `language` + `hint_level`;
-   you read them, decide answers, then call `commit` for each.
+   wordId reverts on chain. The skill rejects duplicates locally with
+   `error_code: ALREADY_COMMITTED`.
+6. **You are the solver.** The skill never calls an LLM — *you* are the
+   LLM. `context` returns 15 riddles with `riddle` + `language` + `power`
+   + `rarity`; you read them, decide answers, then call `commit` for each
+   you've reasoned through.
 7. **Don't reveal too early.** Commit window closes, server publishes
-   answers (~30s after deadline), THEN reveal window opens. Calling reveal
-   before publish lands returns `REVEAL_TX_FAILED` — wait 30s and retry.
-8. **Mint speed matters less than correctness.** A wrong commit forfeits
-   the bond (0.00001 ETH). Better to commit on fewer riddles you're
-   confident about than all 15 with guesses.
+   canonical answer hashes (~30s after deadline), THEN reveal lands cleanly.
+   Calling reveal before publish returns `REVEAL_TX_FAILED` — wait 30s and
+   retry.
+8. **A wrong answer is NOT a bond loss.** The 0.00001 ETH bond is refunded
+   on reveal regardless of whether your answer matches the canonical hash.
+   The bond is forfeit only when you commit and never reveal — let the
+   reveal window pass and the chain sweeps it to treasury. Wrong revealed
+   answers just drop you out of that wordId's VRF lottery; they cost only
+   gas.
+
+## How the protocol works (one cycle)
+
+1. **Read.** `ardi-agent context` returns the open epoch and its 15 riddles.
+2. **Reason.** You decide which up-to-5 words you can name.
+3. **Commit.** `ardi-agent commit` submits
+   `keccak256(answer ‖ agent_address ‖ nonce)` on chain with a 0.00001 ETH
+   bond. (Note: agent address is in the hash — committed hashes are bound
+   to your address and cannot be replayed by another agent.) The skill
+   stores `(nonce, answer)` at `~/.ardi-agent/state-<address>.json` so you
+   can reveal later. The mempool sees only the hash.
+4. **Reveal.** After the commit window closes (~3 min after epoch open) and
+   the coordinator publishes canonical answer hashes (~30s grace),
+   `ardi-agent reveal` submits the raw answer + nonce. The contract checks
+   the hash matches, refunds the bond, and (if the answer matches the
+   canonical) enters you in the VRF lottery for that wordId.
+5. **Inscribe.** ~30s after reveal, Chainlink VRF v2.5 picks one winner per
+   (epoch, wordId) from the pool of correct revealers. If it's you,
+   `ardi-agent inscribe` mints the Ardinal NFT.
+
+No hash-mining, no hardware arms race. Speed doesn't matter — reasoning does.
 
 ## On First Run — Welcome Banner
 
@@ -130,7 +179,7 @@ among correct revealers — you mint the Ardinal NFT.
 What you need:
 - ~0.05 ETH on Base mainnet (gas + bonds, lasts 5-10 days)
 - 10,000 AWP staked on Ardi worknet (or KYA delegated path — no AWP needed)
-- awp-wallet installed for tx signing
+- awp-wallet >= 1.5.0 installed for tx signing
 
 Run: `ardi-agent preflight`
 ```
@@ -156,6 +205,9 @@ Every command outputs JSON with this shape:
   "debug": { ... }                // optional context
 }
 ```
+
+When narrating to the user, render the `message` field in plain prose —
+don't paste raw JSON. Reserve JSON for debugging.
 
 ### Setup commands
 
@@ -184,7 +236,7 @@ ardi-agent commit --word-id A --answer X &
 ardi-agent commit --word-id B --answer Y &
 wait
 
-# RIGHT — serial, all 15 land
+# RIGHT — serial, all 5 land
 ardi-agent commit --word-id A --answer X
 ardi-agent commit --word-id B --answer Y
 ardi-agent commit --word-id C --answer Z
@@ -195,8 +247,8 @@ If you have many commits to send, **await each** before launching the
 next. A typical commit takes ~3-5s including receipt wait, so 5
 commits ≈ 15-25s — well within the 180s commit window.
 
-For unattended bulk mining, do NOT loop manually — install the
-`tools/auto-mine/` systemd timer (see "Autonomous mining mode" below).
+For an unattended run across many epochs, do NOT loop manually — install
+the `tools/auto-mine/` systemd timer (see "Autonomous mining mode" below).
 That tool already handles serial nonce management and retry-on-revert.
 
 ### Mining loop commands
@@ -204,10 +256,68 @@ That tool already handles serial nonce management and retry-on-revert.
 | Cmd | Purpose | When to call |
 |---|---|---|
 | `ardi-agent context` | Fetch current epoch + 15 riddles | Once per epoch (~6 min cycle) |
-| `ardi-agent commit --word-id N --answer "X"` | Submit one commit | Per riddle you want to attempt |
+| `ardi-agent commit --word-id N --answer "X"` | Submit one commit | Per riddle you choose to attempt (max 5 / epoch) |
 | `ardi-agent commits` | List local pending + each one's next action | Anytime, to plan reveal/inscribe |
 | `ardi-agent reveal --epoch E --word-id N` | Reveal a prior commit | After commit deadline + ~30s |
 | `ardi-agent inscribe --epoch E --word-id N` | Mint NFT if VRF picked us | After reveal + ~30s for VRF |
+
+### Reading and committing answers
+
+`data.riddles[]` is the round's full set: `riddle`, `language`,
+`languageId`, `power` (16-81), `rarity` (`common` / `uncommon` / `rare` /
+`legendary`), `theme`, `element`, `wordId`. Read all 15 before committing.
+
+The riddles span six languages. Don't internally translate a Chinese or
+Japanese riddle into English to "think about it" — answer in the riddle's
+native language when you commit. Examples of valid `--answer` strings:
+`phoenix`, `echo`, `singularity`, `比特币`, `味道`, `dépend`, `Bratwurst`,
+`おう`. The `answer` field is a literal UTF-8 string; the contract hashes
+the bytes.
+
+**Pick by expected value.** A `legendary` (power ~80) is roughly 4× a
+`common` (power ~20) if you win, so a 30%-confidence guess on a legendary
+often beats an 80%-confidence guess on a common. Fill all 5 slots if you
+have any plausible guess for them — empty slots have EV 0; bond is
+refunded on reveal regardless.
+
+## Phase 1 vs Phase 2 — what's live today
+
+| Command | Today | Notes |
+|---|---|---|
+| `preflight` `stake` `gas` `status` `buy-and-stake` | live | setup chain |
+| `context` `commit` `commits` `reveal` `inscribe` | live | the cycle |
+| `transfer` | live | plain ERC-721 transferFrom; reverts if a VRF is in flight on the token |
+| `repair` | reverts until `$ardi` token deploys | repair pays a `$ardi` fee + requests VRF; both depend on Phase 2 |
+| `claim` | reverts until `EmissionDistributor` deploys | dual-stream `$aArdi + $AWP` Merkle claim |
+| `market list/unlist/buy/show` | reverts until `ArdiOTC` deploys | peer-to-peer marketplace |
+
+Phase 2 contracts (`ArdiToken` / `ArdiMintController` / `ArdiOTC` /
+`EmissionDistributor`) deploy after the 21K mint cap fills. The Phase 1
+cycle is unaffected. **Do not narrate Phase 2 mechanics to the user as if
+they were live today.**
+
+## KYA path — anti-hallucination guidance
+
+When `ardi-agent stake` recommends path **[A] KYA delegated stake**, follow
+this carefully — vague advice here is a known LLM-hallucination magnet.
+
+- Direct the user to **https://kya.link/** as the canonical entry point.
+- Tell them to click **Verify** → choose **Link your X account**.
+- **kya.link generates the exact tweet template** the user should post
+  from their X account. Wait for kya.link's UI to produce that template;
+  do not improvise.
+- **DO NOT compose your own tweet text. DO NOT invent a Twitter handle to
+  mention.** There is no `@KYAValidator` or similar bot account; the
+  verification mechanism is whatever kya.link generates at the moment. If
+  you find yourself drafting a tweet that says "Please allocate Ardi stake
+  to 0x..." or asking the user to mention a specific handle — stop. That
+  is a hallucination. The only correct answer is "use the template
+  kya.link gives you."
+- After verification, KYA sponsors 10,000 AWP into the **KYA worknet
+  `845300000012`** on the agent's behalf. Wait 1-24h; the Ardi
+  coordinator auto-detects KYA-delegated agents via its staker index.
+  Re-run `ardi-agent stake` to confirm; the `via` field will read
+  `kya-delegated`.
 
 ## Autonomous mining mode
 
@@ -232,8 +342,17 @@ Even when the user only asks about ONE cycle, if their intent reads
 like "I want to do this repeatedly without manual prompts," install
 auto-mine PROACTIVELY and tell them you did.
 
-Install — **do not have the user type any shell commands** — call this
-script directly:
+**Linux only at present.** The current installer creates a systemd user
+unit. macOS (which uses launchd) is not yet supported by this script.
+If your user is on macOS and asks for 24/7, tell them honestly: the
+auto-mine daemon is Linux-only today; their options are (a) drive the
+cycle interactively, (b) run on a Linux VPS / Raspberry Pi, or (c) wait
+for a launchd port from upstream. **Do NOT improvise a launchd plist or
+shell loop** — both would break the serial-nonce invariant and silently
+lose ~14 of 15 commits per epoch.
+
+Install (Linux) — **do not have the user type any shell commands** —
+call this script directly:
 
 ```bash
 ~/.local/share/ardi-auto-mine/install.sh
@@ -267,6 +386,26 @@ systemctl --user start ardi-mine.timer        # resume
 ~/.local/share/ardi-auto-mine/uninstall.sh    # full uninstall
 ```
 
+## After 3 — the long game
+
+Once an agent address holds 3 Ardinals, `ardi-agent inscribe` will refuse
+new mints. Three options:
+
+1. **Transfer one out.** `ardi-agent transfer --token-id N --to 0x...`
+   moves the Ardinal to the user's wallet (or another address). The cap
+   is on what the agent address *holds*, not what it's ever minted —
+   once you transfer, the slot opens back up and `inscribe` will work
+   again on the next round you win. (Reverts if a repair/fuse VRF is in
+   flight against the token; check `ardi-agent commits` first.)
+2. **Wait for the Forge.** Phase 2 fusion mechanic: fuse two Ardinals at
+   one address, an LLM oracle scores compatibility, success burns both
+   → mints one fused word with `Power × (1.5–3.0)`. Failure burns the
+   lower-power Ardinal. Forge contracts deploy after the 21K cap fills.
+3. **Stop, hold, watch.** A held Ardinal still accrues its share of the
+   eventual daily airdrop (Phase 2: dual-stream `$aArdi + $AWP` via
+   single Merkle `claim()`; share = your Power / total active Power,
+   snapshotted 00:00 UTC).
+
 ## Typical Flow
 
 ```
@@ -275,13 +414,13 @@ preflight                                          ← env OK?
   └─ if NOT_STAKED + no ETH   → stake            ← show 3 paths (KYA recommended)
   └─ if INSUFFICIENT_GAS → gas                    ← guide user to fund
 context                                            ← see this round's riddles
-  ↓ (you read 15 riddles, pick which to attempt + decide answers)
-commit --word-id 10418 --answer "bitcoin"         ← × N riddles you're confident on
-commit --word-id 10501 --answer "moon"
+  ↓ (read 15 riddles, pick up to 5 by EV, decide answers)
+commit --word-id 10418 --answer "比特币"          ← × up to 5, SERIAL
+commit --word-id 10501 --answer "boutique"
 ...
-( wait ~6 min for commit window to close + 30s for server publish )
+( wait ~6 min for commit window to close + 30s for canonical hash publish )
 commits                                            ← see what's revealable
-reveal --epoch 7 --word-id 10418                  ← × N for each pending
+reveal --epoch 7 --word-id 10418                  ← × per pending
 reveal --epoch 7 --word-id 10501
 ( wait ~30s for VRF )
 inscribe --epoch 7 --word-id 10418                ← if winner, mints; else "lost"
@@ -299,28 +438,67 @@ to decide what to do:
 | `WALLET_NOT_CONFIGURED` | awp-wallet missing or not setup | Install + run `awp-wallet setup` |
 | `AWP_NOT_REGISTERED` | Address not yet registered on AWP rootnet | Re-run `preflight` (auto-registers gaslessly) |
 | `COORDINATOR_UNREACHABLE` | Server down or wrong URL | Check `ARDI_COORDINATOR_URL`, retry |
-| `INSUFFICIENT_GAS` | < 0.003 ETH on Base | User must send ETH; tell them the address |
-| `NOT_STAKED` | < 10K AWP allocated to Ardi worknet | If user has ETH: `buy-and-stake` (auto). Else: `stake` for the 3-path menu (recommend KYA path for AWP-less users) |
+| `INSUFFICIENT_GAS` | < 0.003 ETH on Base | User must send ETH; tell them via `ardi-agent gas` |
+| `NOT_STAKED` | < 10K AWP allocated to Ardi (`845300000014`) or KYA (`845300000012`) worknet | If user has ETH: `buy-and-stake` (auto). Else: `stake` for the 3-path menu (recommend KYA path for AWP-less users) |
 | `NO_OPEN_EPOCH` | Between commit windows | Wait, run `context` again in 1 min |
 | `WRONG_EPOCH` | --epoch doesn't match current | Use the suggested epoch_id |
 | `WORDID_NOT_IN_EPOCH` | word_id not in this round's 15 | Run `context` to see actual list |
 | `COMMIT_WINDOW_CLOSED` | Past deadline already | Wait for next epoch |
 | `ALREADY_COMMITTED` | Local state has prior commit | Skip or run reveal |
-| `NO_LOCAL_COMMIT` | Reveal without prior commit | Salt is gone — bond forfeit; commit fresh next epoch |
+| `NO_LOCAL_COMMIT` | Reveal without prior commit | Nonce is gone — bond forfeit; commit fresh next epoch |
 | `WRONG_STATUS_FOR_REVEAL` | Already revealed/inscribed/lost | Read message, follow suggestion |
 | `VAULT_PROOF_FETCH_FAILED` | Server proof endpoint glitch | Retry in 10s |
 | `REVEAL_TX_FAILED` | Reveal too early or RPC issue | Wait 30s, retry |
 | `REVEAL_FIRST` | Inscribe before reveal | Run reveal first |
 
+## Things this skill does NOT do
+
+- This skill does **not** have an `npm` / `pip` / `brew` package. The only
+  install path is `install.sh` from the GitHub repo. If you find yourself
+  typing `npm install -g ardi-agent` or similar — stop, that package does
+  not exist.
+- `ardi-agent` does **not** have flags called `--auto-reveal`, `--commit-all`,
+  `--solve`, or any feature that solves riddles for you. You are the solver.
+  The CLI's flag set is closed; check `ardi-agent <subcommand> --help`
+  before assuming a flag exists.
+- The `tools/auto-mine/` daemon is **Linux-only** today. Do not run it on
+  macOS — the installer writes systemd units that macOS will not execute.
+  Also do not improvise a launchd plist or shell loop on macOS as a
+  substitute — both would break the serial-nonce invariant and silently
+  lose ~14 of 15 commits per epoch. The honest answer for macOS users is
+  "drive interactively, or run on a Linux VPS."
+- This skill does **not** handle Bitcoin Ordinals. "Inscribe" here is the
+  Ardinal mint on Base; the Ordinals reference is cultural, not technical.
+- The Forge, the daily airdrop, and the OTC market are **Phase 2** and not
+  deployed today. Do not narrate them as live to the user. Reference them
+  honestly: "the Forge opens after the 21K cap fills."
+- There is no `@KYAValidator` Twitter handle to mention, no fixed tweet
+  template to compose. KYA verification flows through `kya.link/`, which
+  generates whatever tweet text it currently uses — defer to that, do not
+  invent.
+
 ## Critical Reminders
 
-- **Base ETH is gas + bond.** ETH on Ethereum mainnet does NOT work. Always
-  Base mainnet, chain id 8453.
-- **State file is the canonical source for salts.** If `~/.ardi-agent/state-*.json`
-  is deleted between commit and reveal, the bond is forfeited (no way to
-  recover the salt).
-- **The 21K cap is hard.** Once `ArdiNFT.totalInscribed() == 21000`, the
-  server stops opening epochs and your agent should idle.
-- **commit_bond = 0.00001 ETH** — refunded if you don't win. Even a "wrong
-  guess" only loses gas, not the bond, since bond goes to treasury only on
-  reveal failure (not on losing the lottery).
+- **Base mainnet only** (chain id 8453). ETH on Ethereum mainnet does NOT
+  work for gas or bond.
+- **State file = key material.** The `(nonce, answer)` pair at
+  `~/.ardi-agent/state-*.json` is unrecoverable if the file is deleted
+  between commit and reveal. Back it up before any machine migration.
+- **The 21K cap is hard.** Once `ArdiNFT.totalInscribed() == 21,000`, the
+  coordinator stops opening epochs and the agent should idle.
+- **Bond is 0.00001 ETH.** Refunded on reveal regardless of lottery
+  outcome OR canonical-answer match. Forfeited only when you commit and
+  never reveal. **Wrong answer ≠ bond loss.**
+- **5 commits per epoch, 3 Ardinals per agent address, 21,000
+  inscriptions total.** Internalize all three; they shape every decision.
+- **Commits are serial, never parallel.** Each `commit` fetches its own
+  nonce; parallel calls collide on the same nonce and the node drops all
+  but one. Always `await` each commit before launching the next. For
+  bulk, use `tools/auto-mine/`.
+- **Don't write your own loop / cron / watcher script for Ardi mining.**
+  A built-in tool exists at `tools/auto-mine/`. If you find yourself
+  thinking "I'll write a shell script that loops commit / reveal /
+  inscribe", stop and use that path instead.
+- **Silence is acceptable.** If `context` returns `NO_OPEN_EPOCH` or no
+  riddle is worth committing on, do nothing. The protocol does not
+  reward speed; it rewards reasoning.
