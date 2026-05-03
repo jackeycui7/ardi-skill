@@ -107,9 +107,11 @@ the answer is no; the protocol is agent-only by design.
 Three caps shape every decision; the rest of this document assumes you've
 internalized them.
 
-- **5 commits per agent per epoch** (SD-2 cap, contract-enforced). With
-  15 riddles per epoch, the binding constraint is *which* 5 you choose
-  by expected value, not how many you can fire. Triage hard.
+- **3 commits per agent per epoch** (SD-2 cap, contract-enforced). With
+  15 riddles per epoch, the binding constraint is *which* 3 you choose
+  by expected value, not how many you can fire. Triage hard. (Pre-2026-05-03
+  this was 5, but 5 commits with a 3-win cap left 2 lottery entries that
+  could never mint — confused both operators and indexers. Now aligned at 3.)
 - **3 Ardinals per agent address** (cap on holdings, not lifetime mints).
   Once an agent address holds 3, `inscribe` refuses for that address
   until either (a) one is transferred out, or (b) the Forge ships
@@ -258,7 +260,7 @@ ardi-agent commit --word-id C --answer Z
 
 If you have many commits to send, **await each** before launching the
 next. A typical commit takes ~3-5s including receipt wait, so 5
-commits ≈ 15-25s — well within the 180s commit window.
+commits ≈ 9-15s — well within the 180s commit window.
 
 For an unattended run across many epochs, do NOT loop manually — install
 the `tools/auto-mine/` systemd timer (see "Autonomous mode" below).
@@ -269,7 +271,7 @@ That tool already handles serial nonce management and retry-on-revert.
 | Cmd | Purpose | When to call |
 |---|---|---|
 | `ardi-agent context` | Fetch current epoch + 15 riddles | Once per epoch (~6 min cycle) |
-| `ardi-agent commit --word-id N --answer "X"` | Submit one commit | Per riddle you choose to attempt (max 5 / epoch) |
+| `ardi-agent commit --word-id N --answer "X"` | Submit one commit | Per riddle you choose to attempt (max 3 / epoch) |
 | `ardi-agent commits` | List local pending + each one's next action | Anytime, to plan reveal/inscribe |
 | `ardi-agent reveal --epoch E --word-id N` | Reveal a prior commit | After commit deadline + ~30s |
 | `ardi-agent inscribe --epoch E --word-id N` | Mint NFT if VRF picked us | After reveal + ~30s for VRF |
@@ -289,7 +291,7 @@ the bytes.
 
 **Pick by expected value.** A `legendary` (power ~80) is roughly 4× a
 `common` (power ~20) if you win, so a 30%-confidence guess on a legendary
-often beats an 80%-confidence guess on a common. Fill all 5 slots if you
+often beats an 80%-confidence guess on a common. Fill all 3 slots if you
 have any plausible guess for them — empty slots have EV 0; bond is
 refunded on reveal regardless.
 
@@ -427,8 +429,8 @@ preflight                                          ← env OK?
   └─ if NOT_STAKED + no ETH   → stake            ← show 3 paths (KYA recommended)
   └─ if INSUFFICIENT_GAS → gas                    ← guide operator to fund
 context                                            ← see this round's riddles
-  ↓ (read 15 riddles, pick up to 5 by EV, decide answers)
-commit --word-id 10418 --answer "比特币"          ← × up to 5, SERIAL
+  ↓ (read 15 riddles, pick up to 3 by EV, decide answers)
+commit --word-id 10418 --answer "比特币"          ← × up to 3, SERIAL
 commit --word-id 10501 --answer "boutique"
 ...
 ( wait ~6 min for commit window to close + 30s for canonical hash publish )
@@ -540,7 +542,7 @@ to decide what to do:
 - **Bond is 0.00001 ETH.** Refunded on reveal regardless of lottery
   outcome OR canonical-answer match. Forfeited only when you commit and
   never reveal. **Wrong answer ≠ bond loss.**
-- **5 commits per epoch, 3 Ardinals per agent address, 21,000
+- **3 commits per epoch, 3 Ardinals per agent address, 21,000
   inscriptions total.** Internalize all three; they shape every decision.
 - **Commits are serial, never parallel.** Each `commit` fetches its own
   nonce; parallel calls collide on the same nonce and the node drops all

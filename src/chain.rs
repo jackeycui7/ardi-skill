@@ -69,6 +69,11 @@ sol! {
         // Live threshold (commit reverts if agent's summed stake < this).
         // Owner-settable via setMinStake; skill MUST read live, not hardcode.
         function minStake() external view returns (uint256);
+        // Live commit cap per (agent, epoch). Owner-settable via
+        // setMaxCommitsPerEpoch — was 5 pre-2026-05-03, now 3 to align
+        // with 3-win / 3-mint caps. Skill reads live to stay correct
+        // across future tweaks.
+        function maxCommitsPerEpoch() external view returns (uint8);
     }
 }
 

@@ -10,6 +10,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use alloy_primitives::{Address, B256, U256};
+use alloy_sol_types::SolCall;
 use rand::RngCore;
 use serde_json::json;
 use std::str::FromStr;
@@ -254,6 +255,38 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
     );
 
     let to = Address::from_str(&cur.epoch_draw_contract)?;
+
+    // SD-2 cap pre-flight: ArdiEpochDraw enforces maxCommitsPerEpoch (live
+    // value, owner-settable; was 5 pre-2026-05-03, now 3 to align with the
+    // 3-win and 3-mint caps). If the agent has already used the cap in
+    // this epoch the on-chain commit reverts CommitCapReached after
+    // burning gas + the bond escrow path. Catch it locally first.
+    let local_in_epoch = State::load()?
+        .pending
+        .values()
+        .filter(|c| c.epoch_id == epoch_id)
+        .count();
+    let live_max = read_max_commits_per_epoch(&to).unwrap_or(3) as usize;
+    if local_in_epoch >= live_max {
+        Output::error(
+            format!(
+                "Already used your {live_max}-commit cap in epoch {epoch_id} ({local_in_epoch} local commits on file). \
+                 Pick the highest-EV ones and proceed to reveal after the commit window closes."
+            ),
+            "EPOCH_COMMIT_CAP_REACHED",
+            "state",
+            false,
+            "Run `ardi-agent commits` to see what to reveal next, or wait for the next epoch (`ardi-agent context`).".to_string(),
+            Internal {
+                next_action: "wait_reveal_or_next_epoch".into(),
+                next_command: Some("ardi-agent commits".into()),
+                ..Default::default()
+            },
+        )
+        .print();
+        return Ok(());
+    }
+
     let data = tx::calldata_commit(epoch_id, args.word_id, hash, stakers.clone());
     let tx_obj = tx::build_tx(&agent, &to, data, tx::COMMIT_BOND_WEI, 200_000)?;
 
@@ -329,6 +362,21 @@ pub fn run(server_url: &str, args: CommitArgs) -> Result<()> {
 /// Returns empty Vec if no allocations found anywhere; caller hard-errors.
 /// Source of truth is on chain (`AWPAllocator.getAgentStake` at commit) —
 /// stale RPC just means commit reverts.
+/// Read the live `maxCommitsPerEpoch` from the EpochDraw contract.
+/// Owner can change this without redeploy (e.g. 5→3 on 2026-05-03 to
+/// align commit cap with the 3-win / 3-mint caps), so the skill must
+/// not hardcode it. Returns None on any RPC failure — caller falls
+/// back to a conservative default of 3.
+fn read_max_commits_per_epoch(epoch_draw_addr: &Address) -> Option<u8> {
+    let raw = tx::view_call(
+        epoch_draw_addr,
+        chain::ArdiEpochDraw::maxCommitsPerEpochCall {}.abi_encode(),
+    )
+    .ok()?;
+    if raw.len() < 32 { return None; }
+    Some(raw[31])
+}
+
 fn resolve_stakers(_api: &ApiClient, agent_addr: &str) -> Result<Vec<Address>> {
     // Verified against AWP subnets.get on 2026-05-02:
     //   845300000014 = ARDI Worknet (self-stake lives here)
