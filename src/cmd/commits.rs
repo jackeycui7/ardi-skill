@@ -55,9 +55,9 @@ pub fn run(_server_url: &str) -> Result<()> {
     // 30s publish grace). One eth_call per distinct epoch — usually 1-2
     // because users batch within a round.
     let nft_addr = std::env::var("ARDI_NFT_ADDR")
-        .unwrap_or_else(|_| "0x91734696E8164CBF79B666569D2504B0E21218F6".to_string());
+        .unwrap_or_else(|_| "0xf68425D0d451699d0d766150634E436Acd2F05A1".to_string());
     let draw_addr_str = std::env::var("ARDI_EPOCH_DRAW_ADDR")
-        .unwrap_or_else(|_| "0x21c2ebA56c440c292a32F0Fdd16C26Be13d391Bb".to_string());
+        .unwrap_or_else(|_| "0xA57d8E6646E063FFd6eae579d4f327b689dA5DC3".to_string());
     let mut deadline_by_epoch: HashMap<u64, u64> = HashMap::new();
     if let Ok(draw_addr) = Address::from_str(&draw_addr_str) {
         let pending_epochs: std::collections::BTreeSet<u64> = st

@@ -31,7 +31,7 @@ const AWP_ALLOCATOR: &str = "0x0000D6BB5e040E35081b3AaF59DD71b21C9800AA";
 // ArdiEpochDraw v3 proxy on Base mainnet — UUPS upgradable, owner-settable
 // minStake. We read the threshold LIVE from this proxy so the skill always
 // reflects the current contract state instead of a stale constant.
-const EPOCH_DRAW: &str = "0x21c2ebA56c440c292a32F0Fdd16C26Be13d391Bb";
+const EPOCH_DRAW: &str = "0xA57d8E6646E063FFd6eae579d4f327b689dA5DC3";
 // Display fallback only — used in error messages and JSON when the on-chain
 // read fails (e.g. RPC down). Mirrors the value at deploy time but the
 // authoritative source is the chain read below.

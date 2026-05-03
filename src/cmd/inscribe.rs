@@ -97,11 +97,11 @@ pub fn run(server_url: &str, epoch_id: u64, word_id: u64) -> Result<()> {
     };
     let draw_addr = Address::from_str(&resolve(
         "ARDI_EPOCH_DRAW_ADDR", "epochDrawContract", "epoch_draw_contract",
-        "0x21c2ebA56c440c292a32F0Fdd16C26Be13d391Bb",
+        "0xA57d8E6646E063FFd6eae579d4f327b689dA5DC3",
     ))?;
     let nft_addr = Address::from_str(&resolve(
         "ARDI_NFT_ADDR", "ardiNftContract", "ardi_nft_contract",
-        "0x91734696E8164CBF79B666569D2504B0E21218F6",
+        "0xf68425D0d451699d0d766150634E436Acd2F05A1",
     ))?;
 
     // 1. Check on-chain winner.

@@ -1,6 +1,6 @@
 [package]
 name = "ardi-agent"
-version = "0.5.12"
+version = "0.5.13"
 edition = "2021"
 description = "CLI agent for AWP Ardi WorkNet — solve riddles, mint Ardinal NFTs"
 license = "MIT"

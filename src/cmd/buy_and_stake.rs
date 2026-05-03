@@ -537,7 +537,7 @@ fn read_erc20_allowance(token: &str, owner: &Address, spender: &str) -> Result<U
 
 fn read_min_stake_wei() -> Result<U256> {
     use crate::chain::ArdiEpochDraw;
-    const EPOCH_DRAW: &str = "0x21c2ebA56c440c292a32F0Fdd16C26Be13d391Bb";
+    const EPOCH_DRAW: &str = "0xA57d8E6646E063FFd6eae579d4f327b689dA5DC3";
     let addr = Address::from_str(EPOCH_DRAW)?;
     let call = ArdiEpochDraw::minStakeCall {};
     let raw = tx::view_call(&addr, call.abi_encode())?;

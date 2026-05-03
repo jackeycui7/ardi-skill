@@ -27,7 +27,7 @@ pub fn run(server_url: &str) -> Result<()> {
     // operator a one-click verification URL — pre-v0.5.10 the user had to
     // run `cast call` themselves to confirm "did I really mint that?".
     let nft_addr = std::env::var("ARDI_NFT_ADDR")
-        .unwrap_or_else(|_| "0x91734696E8164CBF79B666569D2504B0E21218F6".to_string());
+        .unwrap_or_else(|_| "0xf68425D0d451699d0d766150634E436Acd2F05A1".to_string());
     if let Some(state) = agent_state.as_mut() {
         if let Some(mints) = state.get_mut("mints").and_then(|v| v.as_array_mut()) {
             for m in mints.iter_mut() {

@@ -82,7 +82,7 @@ pub fn run(server_url: &str, epoch_id: u64, word_id: u64) -> Result<()> {
             .ok().flatten()
             .and_then(|c| c.get("epochDrawContract").or_else(|| c.get("epoch_draw_contract"))
                 .and_then(|v| v.as_str()).map(|s| s.to_string()))
-    }).unwrap_or_else(|| "0x21c2ebA56c440c292a32F0Fdd16C26Be13d391Bb".to_string());
+    }).unwrap_or_else(|| "0xA57d8E6646E063FFd6eae579d4f327b689dA5DC3".to_string());
     let to = match Address::from_str(&resolved) {
         Ok(a) => a,
         Err(_) => {
