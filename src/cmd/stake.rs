@@ -42,14 +42,43 @@ const ONE_AWP_WEI: u128 = 1_000_000_000_000_000_000;
 /// has summed stake (across both worknets, all known stakers) >= minStake.
 /// Used by `preflight` so it doesn't go through the coord-rs cache.
 ///
-/// Trade-off: discovery is bounded — checks self-stake AND any stakers
-/// AWP RPC currently knows about. If a brand-new KYA delegation hasn't
-/// been indexed yet, this could undercount briefly (same as `stake`).
+/// Two-tier strategy:
+/// 1. **Fast path**: AWP rootnet `staking.getAgentWorknetStake` for each
+///    worknet — server-side aggregator, returns the exact total in one
+///    HTTP call. Covers self-stake AND every delegator across all chains
+///    without us needing to enumerate stakers. This is the path that
+///    catches the case kaito hit on 2026-05-03 where his agent had
+///    delegated stake on Ardi worknet that the indexer-discover path
+///    silently missed.
+/// 2. **Fallback**: original discover (AWP RPC `getAllocationsByAgentSubnet`)
+///    + per-staker on-chain `getAgentStake` probe. Used when the rootnet
+///    RPC is unreachable (network partition, server maintenance) — the
+///    chain is always the ground truth.
 pub fn check_eligible_onchain(agent_str: &str) -> Result<bool> {
     let agent = Address::from_str(agent_str)?;
     let min_stake_wei = read_min_stake_wei().unwrap_or(U256::from(MIN_STAKE_AWP_DEFAULT) * U256::from(ONE_AWP_WEI));
 
-    // Discovery — agent + AWP-RPC-known stakers.
+    // ── Fast path — single aggregator call per worknet ─────────────
+    if let Ok(rpc) = crate::awp_rpc::AwpRpc::new() {
+        let mut total = U256::ZERO;
+        let mut fast_path_ok = true;
+        for wn in [ARDI_WORKNET_ID, KYA_WORKNET_ID] {
+            match rpc.agent_worknet_stake(agent_str, wn) {
+                Ok(amount_str) => {
+                    if let Ok(v) = U256::from_str_radix(&amount_str, 10) {
+                        total = total.saturating_add(v);
+                    }
+                }
+                Err(_) => { fast_path_ok = false; break; }
+            }
+        }
+        if fast_path_ok {
+            return Ok(total >= min_stake_wei);
+        }
+        // else: fall through to the slower discover+probe loop below
+    }
+
+    // ── Fallback — discover stakers, probe each (staker, worknet) ──
     let mut stakers: BTreeMap<String, Address> = BTreeMap::new();
     stakers.insert(format!("0x{:x}", agent), agent);
     if let Ok(rpc) = crate::awp_rpc::AwpRpc::new() {
@@ -63,8 +92,6 @@ pub fn check_eligible_onchain(agent_str: &str) -> Result<bool> {
             }
         }
     }
-
-    // Probe each (staker, worknet) pair on-chain. First one passing is enough.
     for (_, &staker) in &stakers {
         for wn in [ARDI_WORKNET_ID, KYA_WORKNET_ID] {
             if let Ok(stake_wei) = read_alloc(staker, agent, wn) {

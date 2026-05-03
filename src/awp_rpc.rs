@@ -118,6 +118,25 @@ impl AwpRpc {
             .context("decode allocation rows")?;
         Ok(rows)
     }
+
+    /// Aggregate stake on a (agent, worknet) summed across every staker
+    /// and every chain. Server-side aggregation — one round trip vs. the
+    /// per-staker fan-out of `allocations_by_agent_worknet` + per-row
+    /// on-chain `getAgentStake`. Use this as the fast-path eligibility
+    /// check; fall back to the discover+probe loop only if this errors.
+    /// Returns wei as a decimal string.
+    pub fn agent_worknet_stake(&self, agent: &str, worknet_id: &str) -> Result<String> {
+        let v = self.call(
+            "staking.getAgentWorknetStake",
+            json!({ "agent": agent, "worknetId": worknet_id }),
+        )?;
+        // V2 shape: { amount: "<wei decimal string>" }
+        let amount = v
+            .get("amount")
+            .and_then(|x| x.as_str().map(String::from).or_else(|| x.as_u64().map(|n| n.to_string())))
+            .ok_or_else(|| anyhow!("agent_worknet_stake: missing `amount` in {v}"))?;
+        Ok(amount)
+    }
 }
 
 #[cfg(test)]
