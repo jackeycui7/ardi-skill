@@ -227,13 +227,25 @@ pub fn run(server_url: &str, epoch_id: u64, word_id: u64) -> Result<()> {
     }
     st.save()?;
 
+    // Hand the LLM a clickable URL so the operator can verify on Basescan
+    // immediately — without it, testers had to compose `cast call` to
+    // confirm the mint actually landed (kaito's 2026-05-03 walkthrough,
+    // friction #7). `nft_addr` is the v3 ArdiNFT proxy.
+    let token_url = format!(
+        "{}/token/0x{:x}/{token_id}",
+        crate::cmd::commits::BASESCAN,
+        nft_addr,
+    );
+    let tx_url = format!("{}/tx/{tx_hash}", crate::cmd::commits::BASESCAN);
     let mut data = json!({
         "epoch_id": epoch_id,
         "word_id": word_id,
         "tx_hash": tx_hash,
+        "tx_url": tx_url,
         "token_id": token_id,
+        "token_url": token_url,
     });
-    let mut message = format!("🎉 Inscribed Ardinal #{token_id} — tx={tx_hash}");
+    let mut message = format!("🎉 Inscribed Ardinal #{token_id} — {token_url}");
     if let Some((warn_payload, warn_msg)) =
         crate::cmd::gas::low_balance_warning(&agent_str)
     {
